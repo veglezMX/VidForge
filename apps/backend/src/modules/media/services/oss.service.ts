@@ -32,6 +32,7 @@ export class OssService implements ObjectStorageProvider {
   }
 
   private loadConfig(): OSSConfig | null {
+    if (process.env.VIDFORGE_PROFILE !== 'hosted') return null;
     const region = process.env.OSS_REGION?.trim();
     // 兼容新旧两种变量名（OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY）
     const accessKeyId = process.env.OSS_ACCESS_KEY_ID?.trim() || process.env.OSS_ACCESS_KEY?.trim();

@@ -48,6 +48,10 @@ test('outbox retries a delivery after a queue failure and preserves the event', 
     },
   };
   const service = new AgentOutboxService(repo as never, queue as never);
+  service.registerAgentFallback(
+    async () => {},
+    async () => {}
+  );
 
   await service.flush();
 
@@ -82,6 +86,10 @@ test('outbox uses one stable BullMQ job ID across an enqueue/status crash window
     return baseUpdate(criteria, patch);
   };
   const service = new AgentOutboxService(repo as never, queue as never);
+  service.registerAgentFallback(
+    async () => {},
+    async () => {}
+  );
 
   await service.flush();
   assert.equal(event.status, 'pending');
@@ -90,4 +98,27 @@ test('outbox uses one stable BullMQ job ID across an enqueue/status crash window
   assert.equal(event.status, 'dispatched');
   assert.equal(jobIds.length, 2);
   assert.equal(jobIds[0], jobIds[1]);
+});
+
+test('outbox checks cloud permission on every retry before enqueueing', async () => {
+  const event = createEvent();
+  let queued = 0;
+  const service = new AgentOutboxService(
+    createRepo(event) as never,
+    {
+      enqueue: async () => {
+        queued++;
+      },
+    } as never
+  );
+  service.registerAgentFallback(
+    async () => {},
+    async () => {
+      throw new Error('cloud disabled');
+    }
+  );
+  await service.flush();
+  await service.flush();
+  assert.equal(queued, 0);
+  assert.equal(event.lastError, 'cloud disabled');
 });

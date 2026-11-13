@@ -37,14 +37,19 @@ export class ScriptAgentService {
 
     let scriptResult;
     try {
-      scriptResult = await this.scriptService.generate(state.userId ?? 'agent', {
-        productName: state.productName,
-        category: state.category,
-        sellingPoints: `${sellingPoints}${context}`,
-        targetAudience: state.targetAudience,
-        style: state.style,
-        duration: state.duration,
-      });
+      scriptResult = await this.scriptService.generate(
+        state.userId ?? 'agent',
+        {
+          productName: state.productName,
+          productSpaceId: state.productSpaceId,
+          category: state.category,
+          sellingPoints: `${sellingPoints}${context}`,
+          targetAudience: state.targetAudience,
+          style: state.style,
+          duration: state.duration,
+        },
+        state.taskId
+      );
     } catch (err: any) {
       const endedAt = new Date();
       trace.push({

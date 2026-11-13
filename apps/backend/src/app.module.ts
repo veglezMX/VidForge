@@ -1,3 +1,4 @@
+import { databaseTls } from './database/tls.config';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -44,7 +45,11 @@ import { resolveDatabaseSynchronize } from './database/database-options';
         const syncEnv = configService.get<string>('DB_SYNCHRONIZE');
         const synchronize = resolveDatabaseSynchronize(nodeEnv, syncEnv);
         const logging = nodeEnv === 'development';
-        const ssl = nodeEnv === 'production' ? { rejectUnauthorized: false } : false;
+        const ssl = databaseTls(
+          databaseUrl,
+          configService.get<string>('DB_HOST'),
+          configService.get<string>('DB_TLS')
+        );
 
         if (nodeEnv === 'production' && syncEnv === 'true') {
           console.warn('DB_SYNCHRONIZE=true 在生产环境已被忽略，请执行 backend migration:run');
@@ -56,7 +61,7 @@ import { resolveDatabaseSynchronize } from './database/database-options';
             url: databaseUrl,
             entities: [__dirname + '/**/*.entity{.ts,.js}'],
             synchronize,
-            migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
+            migrations: [__dirname + '/database/migrations/[0-9]*{.ts,.js}'],
             migrationsRun: false,
             logging,
             ssl,
@@ -73,7 +78,7 @@ import { resolveDatabaseSynchronize } from './database/database-options';
           database: configService.get('DB_NAME'),
           entities: [__dirname + '/**/*.entity{.ts,.js}'],
           synchronize,
-          migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
+          migrations: [__dirname + '/database/migrations/[0-9]*{.ts,.js}'],
           migrationsRun: false,
           logging,
           ssl,

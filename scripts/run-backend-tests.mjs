@@ -20,7 +20,7 @@ if (testFiles.length === 0) {
 
 const result = spawnSync(
   process.execPath,
-  ['--test', '--require', 'ts-node/register', ...testFiles],
+  ['--test', '--test-concurrency=2', '--require', 'ts-node/register', ...testFiles],
   { cwd: backendRoot, stdio: 'inherit' }
 );
 

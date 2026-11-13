@@ -6,7 +6,19 @@
  * agents, queues, or the composer depend on a vendor package.
  */
 
-export type ProviderCapability = 'text' | 'video' | 'tts' | 'storage' | 'media';
+export type ProviderCapability =
+  | 'text'
+  | 'vision'
+  | 'image'
+  | 'video'
+  | 'tts'
+  | 'storage'
+  | 'media';
+export interface ProviderContext {
+  userId: string;
+  productSpaceId: string;
+  runId?: string;
+}
 
 export interface TextProviderMessage {
   role: 'system' | 'user' | 'assistant';
@@ -15,6 +27,7 @@ export interface TextProviderMessage {
 
 export interface TextProviderRequest {
   messages: TextProviderMessage[];
+  context?: ProviderContext;
   temperature?: number;
   maxTokens?: number;
   modelKey?: string;
@@ -26,31 +39,29 @@ export interface TextProviderRequest {
 
 export interface TextGenerationProvider {
   readonly capability: 'text';
-  chatCompletion(options: TextProviderRequest): Promise<unknown>;
+  chatCompletion(options: TextProviderRequest): Promise<{ text: string }>;
 }
 
 export interface VideoProviderRequest {
+  context: ProviderContext;
+  operationKey: string;
   prompt: string;
-  /** Stable operation key used by providers that support request idempotency. */
-  idempotencyKey?: string;
-  firstFrameUrl?: string;
-  lastFrameUrl?: string;
-  ratio?: '16:9' | '9:16' | '4:3' | '3:4' | '1:1' | '21:9';
-  resolution?: '480p' | '720p' | '1080p';
-  duration?: number;
-  modelKey?: string;
+  duration: number;
+  materialId?: string;
 }
 
 export interface VideoGenerationProvider {
   readonly capability: 'video';
-  createTask(options: VideoProviderRequest): Promise<{ id: string }>;
-  queryTask(taskId: string, apiKey?: string): Promise<unknown>;
+  generateVideo(options: VideoProviderRequest): Promise<string>;
+  supportedDurations(): Promise<number[]>;
+  cancelRun(runId: string, userId: string): Promise<void>;
+  cancelProject(projectId: string, userId: string): Promise<void>;
 }
 
 export interface TtsSynthesisResult {
   outPath: string;
   durationSec: number;
-  mode: 'real' | 'silence';
+  mode: 'real';
 }
 
 export interface TextToSpeechProvider {
@@ -60,7 +71,8 @@ export interface TextToSpeechProvider {
     text: string,
     outPath: string,
     voiceType?: string,
-    speedRatio?: number
+    speedRatio?: number,
+    context?: ProviderContext
   ): Promise<TtsSynthesisResult>;
 }
 

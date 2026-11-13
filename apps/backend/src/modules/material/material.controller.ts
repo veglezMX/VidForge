@@ -14,7 +14,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
+import { diskStorage } from 'multer';
+import { mkdirSync } from 'node:fs';
+import { FfmpegService } from '../media/services/ffmpeg.service';
 import { extname } from 'path';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs/promises';
@@ -44,7 +46,8 @@ export class MaterialController {
   constructor(
     private readonly materialService: MaterialService,
     private readonly queueRunner: QueueRunnerService,
-    private readonly storageService: StorageService
+    private readonly storageService: StorageService,
+    private readonly ffmpeg: FfmpegService
   ) {}
 
   @Post()
@@ -70,23 +73,15 @@ export class MaterialController {
   @ApiOperation({ summary: '上传素材文件( multipart )' })
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: memoryStorage(),
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          const dir = path.resolve('.processing', 'uploads');
+          mkdirSync(dir, { recursive: true });
+          cb(null, dir);
+        },
+        filename: (_req, _file, cb) => cb(null, randomUUID()),
+      }),
       limits: { fileSize: MAX_MEDIA_UPLOAD_BYTES },
-      fileFilter: (_req, file, cb) => {
-        const allowedMimes = [
-          'image/jpeg',
-          'image/png',
-          'image/webp',
-          'video/mp4',
-          'audio/mpeg',
-          'audio/mp3',
-        ];
-        if (allowedMimes.includes(file.mimetype)) {
-          cb(null, true);
-        } else {
-          cb(new BadRequestException(`不支持的媒体类型: ${file.mimetype}`), false);
-        }
-      },
     })
   )
   async uploadFile(
@@ -101,50 +96,43 @@ export class MaterialController {
       throw new BadRequestException('请选择要上传的文件');
     }
 
-    // 从 MIME 推断素材类型
-    const mimeType = file.mimetype;
-    const assetType = assetTypeForMime(mimeType);
-    if (!assetType) {
-      throw new BadRequestException(`不支持的媒体类型: ${mimeType}`);
+    try {
+      await this.materialService.assertProject(user.sub, productSpaceId);
+      const kind = await this.ffmpeg.validateUpload(file.path);
+      const fileUrl = await this.storageService.storeUpload(
+        file.path,
+        `${randomUUID()}.${kind.ext}`,
+        kind.mime,
+        user.sub
+      );
+      let material: Material;
+      try {
+        material = await this.materialService.create(user.sub, {
+          name: file.originalname,
+          type: kind.type,
+          url: fileUrl,
+          size: file.size,
+          tags: tagsRaw
+            ?.split(',')
+            .map((t) => t.trim())
+            .filter(Boolean),
+          category,
+          productSpaceId,
+        });
+      } catch (error) {
+        await this.storageService.delete(fileUrl, user.sub);
+        throw error;
+      }
+      await this.enqueueAutoAnalyze(user.sub, material);
+      return this.resolveMaterialUrls(material);
+    } finally {
+      await fs.unlink(file.path).catch(() => {});
     }
-
-    // tags 以逗号分隔的字符串传入,转回数组
-    const tags: string[] | undefined = tagsRaw
-      ? tagsRaw
-          .split(',')
-          .map((t: string) => t.trim())
-          .filter(Boolean)
-      : undefined;
-
-    // 生成唯一文件名
-    const filename = `${randomUUID()}${extname(file.originalname)}`;
-
-    // 将内存中的文件写入临时位置，供 StorageService 处理
-    const tmpDir = path.join(process.cwd(), 'storage', 'tmp', 'uploads');
-    await fs.mkdir(tmpDir, { recursive: true });
-    const tmpPath = path.join(tmpDir, filename);
-    await fs.writeFile(tmpPath, file.buffer);
-
-    // 通过 StorageService 存储文件（OSS 或本地），获取可公开访问的 URL
-    const fileUrl = await this.storageService.storeUpload(tmpPath, filename, file.mimetype);
-
-    const dto: CreateMaterialDto = {
-      name: file.originalname,
-      type: assetType,
-      url: fileUrl,
-      size: file.size,
-      tags,
-      category: category || undefined,
-      productSpaceId: productSpaceId || undefined,
-    };
-
-    const material = await this.materialService.create(user.sub, dto);
-    await this.enqueueAutoAnalyze(user.sub, material);
-    return this.resolveMaterialUrls(material);
   }
 
   /** 上传完成后自动入队 AI 分析(异步,不阻塞返回) */
   private async enqueueAutoAnalyze(userId: string, material: Material): Promise<void> {
+    if (!(await this.materialService.canAnalyze(userId, material.productSpaceId))) return;
     if (material.type === 'audio') return; // 音频暂不支持视觉分析
     await this.queueRunner.enqueue(
       QUEUE_NAMES.MATERIAL_ANALYZE,

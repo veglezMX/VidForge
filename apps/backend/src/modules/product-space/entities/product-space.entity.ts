@@ -67,6 +67,9 @@ export class ProductSpace {
 
   /** 是否为默认空间(用户首次注册自动创建) */
   @Column({ default: false })
+  cloudProcessingEnabled: boolean;
+
+  @Column({ default: false })
   isDefault: boolean;
 
   @Column({ default: false })

@@ -1,9 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
-import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { ComposerService } from './composer.service';
 import { FfmpegService } from './ffmpeg.service';
@@ -44,6 +42,12 @@ test(
 
       const ffmpeg = new FfmpegService();
       const storage = {
+        copyOwned: async (url: string, owner: string, destination: string) => {
+          assert.equal(url, '/api/assets/fixture');
+          assert.equal(owner, 'owner');
+          await mkdir(path.dirname(destination), { recursive: true });
+          await copyFile(fixture, destination);
+        },
         createTaskWorkdir: async (_scope: string, taskId: string) =>
           mkdtemp(path.join(workspace, `${taskId}-`)),
         cleanupTaskWorkdir: async (scope: string, taskId: string) => {
@@ -56,7 +60,7 @@ test(
           await rename(localPath, finalPath);
           const file = await stat(finalPath);
           return {
-            url: `/static/outputs/creation/${name}`,
+            url: `/api/assets/${name}`,
             absPath: finalPath,
             size: file.size,
             sha256: 'fixture-sha256',
@@ -71,7 +75,8 @@ test(
         subtitle as never,
         tts as never,
         bgm as never,
-        storage as never
+        storage as never,
+        { assert: async () => {} } as never
       );
 
       const result = await composer.compose(
@@ -79,13 +84,14 @@ test(
           {
             id: 'fixture-shot',
             index: 1,
-            videoUrl: pathToFileURL(fixture).href,
+            videoUrl: '/api/assets/fixture',
             duration: 1,
             caption: 'VidForge smoke fixture',
           },
         ],
         {
           taskId: 'smoke-task',
+          userId: 'owner',
           title: 'VidForge smoke fixture',
           ratio: '9:16',
           resolution: '480p',
@@ -95,7 +101,7 @@ test(
 
       const artifact = await stat(rendered);
       const metadata = await ffmpeg.probe(rendered);
-      assert.equal(result.finalUrl, '/static/outputs/creation/smoke-task.mp4');
+      assert.equal(result.finalUrl, '/api/assets/smoke-task.mp4');
       assert.equal(result.finalAbsPath, rendered);
       assert.equal(result.fileSize, artifact.size);
       assert.equal(result.checksumSha256, 'fixture-sha256');

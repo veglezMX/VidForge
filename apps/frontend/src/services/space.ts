@@ -8,6 +8,7 @@ export interface ProductSpace {
   productName?: string | null;
   category?: string | null;
   coverUrl?: string | null;
+  cloudProcessingEnabled: boolean;
   isDefault: boolean;
   isArchived: boolean;
   createdAt: string;
@@ -32,7 +33,7 @@ export const spaceApi = {
   findOne(id: string) {
     return apiClient.get<any, ProductSpace>(`/spaces/${id}`);
   },
-  update(id: string, data: Partial<CreateSpacePayload>) {
+  update(id: string, data: Partial<CreateSpacePayload> & { cloudProcessingEnabled?: boolean }) {
     return apiClient.patch<any, ProductSpace>(`/spaces/${id}`, data);
   },
   archive(id: string) {

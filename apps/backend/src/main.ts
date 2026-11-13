@@ -2,7 +2,6 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import * as path from 'path';
 import { AppModule } from './app.module';
 import { requestContextMiddleware } from './common/observability/request-context';
 
@@ -29,7 +28,6 @@ async function bootstrap() {
       // 显式白名单
       if (allowedOrigins.includes(origin)) return callback(null, true);
       // 兜底：允许所有 *.vercel.app 子域，方便 Preview 环境
-      if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return callback(null, true);
       return callback(new Error(`CORS blocked: ${origin}`), false);
     },
     credentials: true,
@@ -47,11 +45,6 @@ async function bootstrap() {
   // 全局前缀
   app.setGlobalPrefix('api');
 
-  // 静态文件托管:暴露 storage/outputs 与 storage/bgm 等产物目录
-  // 前端通过 /static/outputs/creation/<taskId>.mp4 访问最终视频
-  const storageRoot = path.resolve(process.cwd(), 'storage');
-  app.useStaticAssets(storageRoot, { prefix: '/static/' });
-
   // Swagger文档配置
   const config = new DocumentBuilder()
     .setTitle('VidForge API')
@@ -63,7 +56,7 @@ async function bootstrap() {
   SwaggerModule.setup('api/docs', app, document);
 
   const port = process.env.PORT || 3001;
-  await app.listen(port);
+  await app.listen(port, '127.0.0.1');
   console.log(`🚀 Application is running on: http://localhost:${port}/api`);
   console.log(`📚 Swagger文档: http://localhost:${port}/api/docs`);
 }

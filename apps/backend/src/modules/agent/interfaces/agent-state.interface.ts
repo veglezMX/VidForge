@@ -29,7 +29,8 @@ export interface ShotOutput {
   /** 真实生成出的视频 URL */
   videoUrl?: string;
   /** 该分镜的 ARK 任务 ID */
-  arkTaskId?: string;
+  providerJobId?: string;
+  provider?: string;
   /** 失败信息 */
   errorMessage?: string;
 }
@@ -90,7 +91,7 @@ export interface AgentState {
     voiceover: string;
     style: string;
     /** 模型来源 */
-    source: 'ark' | 'fallback';
+    source: 'gateway' | 'fallback';
     fallbackReason?: string;
     /** RAG evidence retained for auditability and downstream routing. */
     ragReferences?: Array<{ id: string; hookType: string; performance: string }>;

@@ -25,6 +25,7 @@ export function getApiFailureMessage(error: unknown, fallback: string): string {
 
 const apiClient = axios.create({
   baseURL: `${API_BASE_URL}/api`,
+  withCredentials: true,
   timeout: 120000, // ARK 视觉分析可能需 30-60s, 设 120s
   // 不设置默认 Content-Type，让 Axios 根据请求数据自动设置
   // (FormData → multipart/form-data; JSON → application/json)

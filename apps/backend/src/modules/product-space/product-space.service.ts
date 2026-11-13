@@ -1,3 +1,4 @@
+import { GatewayVideoService } from '../ai/services/gateway-video.service';
 import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -10,7 +11,8 @@ export class ProductSpaceService {
 
   constructor(
     @InjectRepository(ProductSpace)
-    private readonly repo: Repository<ProductSpace>
+    private readonly repo: Repository<ProductSpace>,
+    private readonly gateway: GatewayVideoService
   ) {}
 
   /**
@@ -47,6 +49,11 @@ export class ProductSpaceService {
 
   async update(userId: string, spaceId: string, dto: UpdateProductSpaceDto): Promise<ProductSpace> {
     const space = await this.findOne(userId, spaceId);
+    if (dto.cloudProcessingEnabled !== undefined) {
+      space.cloudProcessingEnabled = dto.cloudProcessingEnabled;
+      await this.repo.save(space);
+      if (!space.cloudProcessingEnabled) await this.gateway.cancelProject(spaceId, userId);
+    }
     if (dto.name !== undefined) space.name = dto.name.trim();
     if (dto.description !== undefined) space.description = dto.description.trim();
     if (dto.productName !== undefined) space.productName = dto.productName.trim();
@@ -61,7 +68,9 @@ export class ProductSpaceService {
   async archive(userId: string, spaceId: string): Promise<void> {
     const space = await this.findOne(userId, spaceId);
     space.isArchived = true;
+    space.cloudProcessingEnabled = false;
     await this.repo.save(space);
+    await this.gateway.cancelProject(spaceId, userId);
   }
 
   async setDefault(userId: string, spaceId: string): Promise<void> {

@@ -1,11 +1,12 @@
+import { GatewayVideoService } from '../ai/services/gateway-video.service';
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Script } from './entities/script.entity';
 import { CreateScriptDto } from './dto/create-script.dto';
 import { GenerateScriptDto } from './dto/generate-script.dto';
-import { ArkTextService } from '../ai/services/ark-text.service';
-import { ArkConfigService } from '../ai/services/ark-config.service';
+import { GatewayTextService } from '../ai/services/gateway-text.service';
+import { GatewayConfigService } from '../ai/services/gateway-config.service';
 import { searchHitScripts, HitScriptSeed } from '../rag/hit-scripts.seed';
 import { ProductSpace } from '../product-space/entities/product-space.entity';
 import { ComplianceService, ComplianceReport } from '../compliance/compliance.service';
@@ -29,7 +30,7 @@ export interface ScriptResult {
   bgmSuggestion: string;
   tags: string[];
   /** 模型来源标识：'ark' / 'fallback' */
-  source: 'ark' | 'fallback';
+  source: 'gateway' | 'fallback';
   /** 当 source=fallback 时, 说明原因, 便于排查 */
   fallbackReason?: string;
   /** 本次生成参考的爆款脚本 ID 列表(RAG) */
@@ -59,42 +60,18 @@ export class ScriptService {
     private scriptRepository: Repository<Script>,
     @InjectRepository(ProductSpace)
     private productSpaceRepository: Repository<ProductSpace>,
-    private readonly arkTextService: ArkTextService,
-    private readonly arkConfigService: ArkConfigService,
-    private readonly compliance: ComplianceService
+    private readonly arkTextService: GatewayTextService,
+    private readonly arkConfigService: GatewayConfigService,
+    private readonly compliance: ComplianceService,
+    private readonly video: GatewayVideoService
   ) {}
 
-  async generate(userId: string, dto: GenerateScriptDto): Promise<ScriptResult> {
+  async generate(userId: string, dto: GenerateScriptDto, runId?: string): Promise<ScriptResult> {
     // ── 1) 商品空间知识库飞轮:把空间内的"卖点 / 品牌 TOV / 自定义违禁词"
     //       自动注入到本次生成,使商家用得越久,系统越懂他的品牌。
     const enrichedDto = await this.enrichWithSpaceKnowledge(userId, dto);
 
-    // 没配置文本模型,直接降级
-    if (!this.arkConfigService.getActiveApiKey('text')) {
-      const reason =
-        '后端未配置 ARK 文本模型环境变量 (ARK_TEXT_PRIMARY_ENDPOINT_ID / ARK_TEXT_PRIMARY_API_KEY)';
-      this.logger.warn(`未检测到 ARK 文本模型配置,使用 fallback 剧本: ${reason}`);
-      return { ...this.generateFallback(enrichedDto), fallbackReason: reason };
-    }
-
-    try {
-      const result = await this.callArk(enrichedDto);
-      // 生成完成后做合规扫描(快速,不调 LLM)
-      result.compliance = this.compliance.scanText(
-        result.shots.map((s) => `${s.voiceover} ${s.caption ?? ''}`).join(' '),
-        await this.collectCustomForbidden(userId, dto.productSpaceId)
-      );
-      return result;
-    } catch (error: any) {
-      const reason = error?.message ?? String(error);
-      this.logger.error(`调用 ARK 失败,降级到 fallback: ${reason}`);
-      const fb = this.generateFallback(enrichedDto);
-      fb.fallbackReason = reason;
-      fb.compliance = this.compliance.scanText(
-        fb.shots.map((s) => `${s.voiceover} ${s.caption ?? ''}`).join(' ')
-      );
-      return fb;
-    }
+    return this.callGateway(enrichedDto, userId, runId);
   }
 
   /** 收集该用户/空间的自定义违禁词,用于合规扫描扩展词典 */
@@ -144,7 +121,7 @@ export class ScriptService {
       if (k.brandVoice) {
         merged.sellingPoints = `${merged.sellingPoints ?? ''}\n\n[品牌语气] ${k.brandVoice}`;
       }
-      // 透传 bestPractices,callArk 会拼到 referenceBlock
+      // 透传 bestPractices,callGateway 会拼到 referenceBlock
       merged._bestPractices = k.bestPractices ?? [];
 
       this.logger.log(
@@ -161,8 +138,17 @@ export class ScriptService {
    * 真实调用火山方舟文本模型生成剧本
    * 让模型按 JSON 结构返回分镜，便于前端直接消费
    */
-  private async callArk(dto: GenerateScriptDto): Promise<ScriptResult> {
-    const targetDuration = dto.duration && dto.duration > 0 ? dto.duration : 15;
+  private async callGateway(
+    dto: GenerateScriptDto,
+    userId: string,
+    runId?: string
+  ): Promise<ScriptResult> {
+    const supported = await this.video.supportedDurations();
+    const targetDuration = dto.duration ?? supported[0] * 3;
+    if (!supported.some((seconds) => Math.abs(seconds * 3 - targetDuration) < 0.001))
+      throw new Error(
+        `Choose a supported total duration: ${supported.map((s) => s * 3).join(', ')} seconds`
+      );
     const styleLabel = STYLE_LABEL[dto.style ?? 'professional'] ?? '专业';
     const audience = dto.targetAudience?.trim() || '通用消费者';
 
@@ -175,6 +161,7 @@ export class ScriptService {
 
     const systemPrompt = [
       '你是顶级电商带货短视频编剧,擅长为 TikTok Shop / 抖音电商写高转化分镜剧本。',
+      `Exactly three shots; each shot duration must be ${targetDuration / 3} seconds.`,
       '严格按用户提供的 JSON Schema 输出,不要输出任何额外说明文字、不要使用 markdown 代码块包裹。',
       '请充分参考"爆款案例"段落里的钩子风格、镜头描述写法、CTA 措辞,但不要复制原句,要结合本商品再创作。',
     ].join(' ');
@@ -226,6 +213,7 @@ ${referenceBlock}
 ${schema}`;
 
     const response = await this.arkTextService.chatCompletion({
+      context: { userId, productSpaceId: dto.productSpaceId!, runId },
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -237,17 +225,30 @@ ${schema}`;
       traceSpan: 'script.generate',
     });
 
-    const content: string = response?.choices?.[0]?.message?.content ?? '';
+    const content: string = response?.text ?? '';
     if (!content) {
-      throw new Error('ARK 返回内容为空');
+      throw new Error('gateway 返回内容为空');
     }
 
     const parsed = this.safeParseJson(content);
     if (!parsed) {
-      this.logger.warn(`ARK 返回内容无法解析为 JSON: ${content.slice(0, 200)}`);
-      throw new Error('ARK 返回非 JSON 结构');
+      this.logger.warn('Gateway returned malformed structured output');
+      throw new Error('gateway 返回非 JSON 结构');
     }
 
+    if (
+      !Array.isArray(parsed.shots) ||
+      parsed.shots.length !== 3 ||
+      parsed.shots.some(
+        (s: any) =>
+          typeof s.description !== 'string' ||
+          typeof s.voiceover !== 'string' ||
+          typeof s.duration !== 'number' ||
+          !Number.isFinite(s.duration) ||
+          Math.abs(s.duration - targetDuration / 3) > 0.001
+      )
+    )
+      throw new Error('Invalid script response');
     return this.normalizeScript(parsed, dto, targetDuration, referenceHits);
   }
 
@@ -329,7 +330,7 @@ ${schema}`;
     referenceHits: HitScriptSeed[] = []
   ): ScriptResult {
     const rawShots: any[] = Array.isArray(raw?.shots) ? raw.shots : [];
-    const shots: ShotDraft[] = rawShots.slice(0, 3).map((s, i) => ({
+    const shots: ShotDraft[] = rawShots.map((s, i) => ({
       index: i + 1,
       duration: typeof s?.duration === 'number' ? s.duration : Math.round(targetDuration / 3),
       description: String(s?.description ?? `分镜 ${i + 1}`).trim(),
@@ -341,18 +342,6 @@ ${schema}`;
       type: s?.type ? String(s.type) : undefined,
     }));
 
-    // 不足 3 个补齐
-    while (shots.length < 3) {
-      const i = shots.length + 1;
-      shots.push({
-        index: i,
-        duration: Math.round(targetDuration / 3),
-        description: `${dto.productName} 分镜 ${i}`,
-        voiceover: '',
-        caption: '',
-      });
-    }
-
     return {
       title: String(raw?.title ?? `${dto.productName} · 带货视频`).trim(),
       duration: targetDuration,
@@ -363,7 +352,7 @@ ${schema}`;
       tags: Array.isArray(raw?.tags)
         ? raw.tags.map(String)
         : ['好物推荐', '带货视频', dto.category],
-      source: 'ark',
+      source: 'gateway',
       ragReferences: referenceHits.map((h) => ({
         id: h.id,
         hookType: h.hookType,
@@ -477,61 +466,20 @@ ${schema}`;
     const script = await this.findOne(userId, id);
     const shots = Array.isArray(script.storyboard) ? script.storyboard : [];
     const shot = shots.find((s: any) => s.index === shotIndex);
-    if (!shot) throw new NotFoundException(`分镜 #${shotIndex} 不存在`);
-
-    // 简单 ARK 调用:仅重新生成该分镜描述和口播
-    try {
-      if (this.arkConfigService.getActiveApiKey('text')) {
-        const prompt = `你是一位电商视频分镜编剧。请为以下商品重新生成第 ${shotIndex} 个分镜的内容。
-
-商品: ${script.productName}
-品类: ${script.category}
-卖点: ${script.sellingPoints}
-分镜类型: ${shot.type ?? 'general'}
-当前描述: ${shot.description}
-
-要求:
-1. 输出 JSON: { "description": "画面描述", "voiceover": "口播文案", "caption": "字幕(≤16字)", "cameraMovement": "镜头运动" }
-2. 不要输出任何额外文字
-3. 全部使用中文`;
-
-        const response = await this.arkTextService.chatCompletion({
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.8,
-          maxTokens: 500,
-        });
-
-        const content: string = response?.choices?.[0]?.message?.content ?? '';
-        if (content) {
-          const trimmed = content.trim();
-          const match = trimmed.match(/\{[\s\S]*\}/);
-          const parsed = match ? JSON.parse(match[0]) : JSON.parse(trimmed);
-          return {
-            ...shot,
-            description: parsed.description ?? shot.description,
-            voiceover: parsed.voiceover ?? shot.voiceover,
-            caption: (parsed.caption ?? shot.caption)?.slice(0, 24),
-            cameraMovement: parsed.cameraMovement ?? shot.cameraMovement,
-            _regenerated: true,
-          };
-        }
-      }
-    } catch (err: any) {
-      this.logger.warn(`regenerateShot ARK 调用失败: ${err.message}, 使用基本重写`);
-    }
-
-    // 兜底:修改描述
-    const alternatives = [
-      '全新角度展示产品细节，镜头缓缓推进',
-      '近距离特写，突出产品质感和工艺',
-      '动态场景切换，全方位呈现使用效果',
-      '柔和自然光线下，展示产品真实状态',
-    ];
-    const altIdx = shotIndex % alternatives.length;
-    return {
-      ...shot,
-      description: `${alternatives[altIdx]} — ${script.productName}`,
-      _regenerated: true,
-    };
+    if (!shot) throw new NotFoundException();
+    const result = await this.arkTextService.chatCompletion({
+      context: { userId, productSpaceId: script.productSpaceId },
+      messages: [
+        {
+          role: 'user',
+          content: `Rewrite this shot as JSON with string description, voiceover and caption: ${JSON.stringify(shot)}`,
+        },
+      ],
+      maxTokens: 800,
+    });
+    const parsed = JSON.parse(result.text);
+    if (!['description', 'voiceover', 'caption'].every((k) => typeof parsed[k] === 'string'))
+      throw new Error('Invalid shot response');
+    return { ...shot, ...parsed, _regenerated: true };
   }
 }

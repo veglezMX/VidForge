@@ -1,3 +1,4 @@
+import { useAuthStore } from '../store/useAuthStore';
 import apiClient from '../utils/api';
 import { io, Socket } from 'socket.io-client';
 
@@ -85,6 +86,7 @@ export const creationApi = {
     const baseUrl = resolveSocketUrl();
     const socket: Socket = io(`${baseUrl}/creation`, {
       transports: ['websocket', 'polling'],
+      auth: (callback) => callback({ token: useAuthStore.getState().token }),
       reconnectionAttempts: 5,
       timeout: 10000,
     });

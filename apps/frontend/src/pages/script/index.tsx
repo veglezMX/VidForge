@@ -6,7 +6,6 @@ import {
   Input,
   Form,
   Select,
-  Slider,
   Space,
   Typography,
   Tag,
@@ -347,7 +346,18 @@ function ScriptPage() {
   const [inspireData, setInspireData] = useState<InspireSeed[]>([]);
   const [inspireLoading, setInspireLoading] = useState(false);
   const [scriptStyle, setScriptStyle] = useState<ScriptStyle>('professional');
-  const [duration, setDuration] = useState<number>(15);
+  const [duration, setDuration] = useState<number>(18);
+  const [supportedDurations, setSupportedDurations] = useState<number[]>([]);
+  useEffect(() => {
+    aiApi
+      .capabilities()
+      .then(({ shotDurations }) => {
+        const totals = shotDurations.map((seconds) => seconds * 3);
+        setSupportedDurations(totals);
+        if (totals.length) setDuration(totals[0]);
+      })
+      .catch(() => setSupportedDurations([]));
+  }, []);
   const [form] = Form.useForm();
   const [formValues, setFormValues] = useState<Record<string, any>>({});
   const DRAFT_KEY = 'script_config';
@@ -406,34 +416,7 @@ function ScriptPage() {
         productSpaceId: spaceId,
       })) as ScriptResult;
       setResult(data);
-      if (data?.source === 'fallback') {
-        const reason = (data as any)?.fallbackReason || '原因未知';
-        Modal.warning({
-          title: 'AI 模型未生效，已为你生成示例剧本',
-          width: 520,
-          content: (
-            <div>
-              <Paragraph style={{ marginBottom: 8 }}>
-                后端没有真正调到火山方舟模型，本次用的是示例兜底数据。
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 8 }}>
-                <Text type="secondary">原因：</Text>
-                <Text code copyable style={{ wordBreak: 'break-all' }}>
-                  {String(reason)}
-                </Text>
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 0 }}>
-                可点击页面右上角「诊断 AI 模型」按钮查看详细自检结果， 或检查 Railway
-                后端是否正确配置了
-                <Text code>ARK_TEXT_PRIMARY_ENDPOINT_ID</Text>/
-                <Text code>ARK_TEXT_PRIMARY_API_KEY</Text>。
-              </Paragraph>
-            </div>
-          ),
-        });
-      } else {
-        message.success('剧本生成成功');
-      }
+      message.success('剧本生成成功');
     } catch (err: any) {
       const isTimeout = err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message ?? '');
       const msg = isTimeout
@@ -465,96 +448,12 @@ function ScriptPage() {
     setDiagnosing(true);
     try {
       const result = await aiApi.diagnose();
-      if (result.ok) {
-        Modal.success({
-          title: 'ARK 文本模型可用',
-          width: 480,
-          content: (
-            <div>
-              <Paragraph style={{ marginBottom: 8 }}>
-                后端已成功调通火山方舟，剧本生成会真实驱动大模型。
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 4 }}>
-                <Text type="secondary">Endpoint：</Text>
-                <Text code>{result.endpointId}</Text>
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 4 }}>
-                <Text type="secondary">耗时：</Text>
-                <Text>{result.durationMs} ms</Text>
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 0 }}>
-                <Text type="secondary">样例返回：</Text>
-                <Text code copyable>
-                  {result.sample}
-                </Text>
-              </Paragraph>
-            </div>
-          ),
-        });
-      } else {
-        Modal.error({
-          title: 'ARK 文本模型不可用',
-          width: 560,
-          content: (
-            <div>
-              <Paragraph style={{ marginBottom: 8 }}>
-                <Text type="secondary">阶段：</Text>
-                <Text code>{result.stage}</Text>
-                {result.stage === 'config'
-                  ? '（后端未配置环境变量）'
-                  : '（环境变量已配置，但调用真实失败）'}
-              </Paragraph>
-              {result.endpointId && (
-                <Paragraph style={{ marginBottom: 4 }}>
-                  <Text type="secondary">Endpoint：</Text>
-                  <Text code>{result.endpointId}</Text>
-                </Paragraph>
-              )}
-              {result.endpointFingerprint && (
-                <Paragraph style={{ marginBottom: 4 }}>
-                  <Text type="secondary">Endpoint 指纹：</Text>
-                  <Text code>
-                    len={result.endpointFingerprint.length} {result.endpointFingerprint.masked}
-                  </Text>
-                  {result.endpointFingerprint.issues.length > 0 && (
-                    <Text type="danger" style={{ marginLeft: 8 }}>
-                      ⚠ {result.endpointFingerprint.issues.join(', ')}
-                    </Text>
-                  )}
-                </Paragraph>
-              )}
-              {result.apiKeyFingerprint && (
-                <Paragraph style={{ marginBottom: 8 }}>
-                  <Text type="secondary">API Key 指纹：</Text>
-                  <Text code>
-                    len={result.apiKeyFingerprint.length} {result.apiKeyFingerprint.masked}
-                  </Text>
-                  {result.apiKeyFingerprint.issues.length > 0 && (
-                    <Text type="danger" style={{ marginLeft: 8 }}>
-                      ⚠ {result.apiKeyFingerprint.issues.join(', ')}
-                    </Text>
-                  )}
-                </Paragraph>
-              )}
-              <Paragraph style={{ marginBottom: 8 }}>
-                <Text type="secondary">原因：</Text>
-                <Text code copyable style={{ wordBreak: 'break-all' }}>
-                  {result.reason}
-                </Text>
-              </Paragraph>
-              <Paragraph style={{ marginBottom: 0 }}>
-                若错误是「API key doesn't exist」，多为以下情况：
-                <br />
-                1. API Key 已被吊销/重置 → 去火山方舟控制台重新生成
-                <br />
-                2. 黏贴时混入空格/换行/引号 → 看上方指纹是否有 ⚠
-                <br />
-                3. Key 与 Endpoint 不在同一火山账号下
-              </Paragraph>
-            </div>
-          ),
-        });
-      }
+      Modal.info({
+        title: 'Gateway configuration',
+        content: result.text
+          ? 'Text gateway is configured. Requests require project cloud consent.'
+          : 'Configure LLM_GATEWAY_URL and a scoped LLM_GATEWAY_KEY in the backend environment.',
+      });
     } catch (err: any) {
       message.error(err?.message ?? '诊断接口请求失败');
     } finally {
@@ -658,7 +557,7 @@ function ScriptPage() {
                       爆款参考
                     </Button>
                   </Tooltip>
-                  <Tooltip title="一键自检后端 ARK 文本模型是否可用">
+                  <Tooltip title="检查后端网关配置">
                     <Button
                       size="small"
                       icon={<ApiOutlined />}
@@ -825,17 +724,14 @@ function ScriptPage() {
                       </Text>
                     }
                   >
-                    <Slider
-                      min={10}
-                      max={30}
-                      step={5}
-                      marks={{ 10: '10s', 15: '15s', 20: '20s', 25: '25s', 30: '30s' }}
+                    <Select
                       value={duration}
-                      onChange={(v) => setDuration(v as number)}
-                      tooltip={{ formatter: (v) => `${v}秒` }}
+                      onChange={setDuration}
+                      disabled={!supportedDurations.length}
+                      options={supportedDurations.map((value) => ({ value, label: `${value}秒` }))}
                     />
                     <Text style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                      系统将生成 3 个分镜，平均分配时长。当前阶段单条视频建议 ≤ 30 秒。
+                      时长由配置的视频模型决定。文字分镜会先生成首帧，产生额外图片费用。
                     </Text>
                   </Form.Item>
 
@@ -907,7 +803,7 @@ function ScriptPage() {
                 等待创作
               </Title>
               <Paragraph type="secondary" style={{ maxWidth: 360, margin: '0 auto' }}>
-                填写左侧商品信息，AI 将基于火山方舟模型生成专业带货剧本，包含分镜脚本、配音文案和
+                填写左侧商品信息，AI 将基于配置的文本模型生成专业带货剧本，包含分镜脚本、配音文案和
                 BGM 推荐
               </Paragraph>
             </GlassPanel>
@@ -927,7 +823,7 @@ function ScriptPage() {
                     </Text>
                     <Tag color="blue">⏱ {result.totalDuration}</Tag>
                     {result.source === 'fallback' && <Tag color="orange">兜底剧本</Tag>}
-                    {result.source === 'ark' && <Tag color="cyan">AI 生成</Tag>}
+                    {result.source === 'gateway' && <Tag color="cyan">AI 生成</Tag>}
                   </Space>
                 }
                 style={{
@@ -979,7 +875,7 @@ function ScriptPage() {
                         </Text>
                         <Text style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
                           {result.source === 'fallback'
-                            ? '当前为兜底剧本,合成质量有限。检查 ARK 配置后建议重新生成'
+                            ? '当前为兜底剧本,合成质量有限。请重新生成剧本'
                             : `共 ${result.shots.length} 个分镜,可直接带入视频生成页开始 AI 视频合成`}
                         </Text>
                       </div>

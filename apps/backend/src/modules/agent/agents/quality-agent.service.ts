@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AgentState } from '../interfaces/agent-state.interface';
-import { ArkTextService } from '../../ai/services/ark-text.service';
-import { ArkConfigService } from '../../ai/services/ark-config.service';
+import { GatewayTextService } from '../../ai/services/gateway-text.service';
+import { GatewayConfigService } from '../../ai/services/gateway-config.service';
 
 /**
  * 质量评估 Agent(真实多维度打分)
@@ -58,8 +58,8 @@ export class QualityAgentService {
   private readonly hypeForbidden = ['赚到了', '免费白送', '一夜暴富'];
 
   constructor(
-    private readonly arkText: ArkTextService,
-    private readonly arkConfig: ArkConfigService
+    private readonly arkText: GatewayTextService,
+    private readonly arkConfig: GatewayConfigService
   ) {}
 
   async evaluate(state: AgentState): Promise<Partial<AgentState>> {
@@ -130,7 +130,7 @@ export class QualityAgentService {
     // ── 4) 一致性 + 钩子(LLM 多维评分) ─────────
     let consistency = 70;
     let hookStrength = 70;
-    if (this.arkConfig.getActiveApiKey('text') && shots.length > 0) {
+    if (this.arkConfig.available('text') && shots.length > 0) {
       try {
         const llmScore = await this.scoreByLlm(state);
         consistency = llmScore.consistency;
@@ -259,6 +259,11 @@ ${compactPlan}
 {"consistency": <0-100>, "hookStrength": <0-100>}`;
 
     const resp = await this.arkText.chatCompletion({
+      context: {
+        userId: state.userId!,
+        productSpaceId: state.productSpaceId!,
+        runId: state.taskId,
+      },
       messages: [
         { role: 'system', content: '你是严格的短视频内容评估专家,只输出 JSON' },
         { role: 'user', content: prompt },
@@ -266,7 +271,7 @@ ${compactPlan}
       temperature: 0.2,
       maxTokens: 200,
     });
-    const content: string = resp?.choices?.[0]?.message?.content ?? '';
+    const content: string = resp?.text ?? '';
     const m = content.match(/\{[\s\S]*\}/);
     if (!m) throw new Error('LLM 评分非 JSON');
     const json = JSON.parse(m[0]);

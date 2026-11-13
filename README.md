@@ -1,3 +1,5 @@
+> **Gateway fork:** This maintained fork uses local llm-gateway/media-gateway services, private local assets and project cloud consent. ARK credentials are not used. Follow [local setup](plans/gateway-provider-integration/operations.md) and [security notes](plans/gateway-provider-integration/security-review.md). Historical upstream documentation below may describe the retired ARK/OSS deployment.
+
 <p align="center">
   <img src="./.github/assets/social-preview.jpg" alt="VidForge — Multi-Agent video generation workspace" width="920" />
 </p>

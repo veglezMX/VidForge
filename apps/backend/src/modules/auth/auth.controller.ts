@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
+import { Body, Controller, Get, Patch, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto, LoginDto, RegisterDto, UpdateProfileDto } from './dto/auth.dto';
@@ -13,14 +14,30 @@ export class AuthController {
 
   @Post('register')
   @ApiOperation({ summary: '注册新账号' })
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) response: Response) {
+    const result = await this.authService.register(dto);
+    response.cookie('vidforge_asset', result.token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.COOKIE_SECURE === 'true',
+      path: '/api/assets',
+      maxAge: 7 * 86400000,
+    });
+    return result;
   }
 
   @Post('login')
   @ApiOperation({ summary: '登录' })
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) response: Response) {
+    const result = await this.authService.login(dto);
+    response.cookie('vidforge_asset', result.token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.COOKIE_SECURE === 'true',
+      path: '/api/assets',
+      maxAge: 7 * 86400000,
+    });
+    return result;
   }
 
   @Get('me')

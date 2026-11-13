@@ -1,4 +1,12 @@
-import { IsOptional, IsString, MaxLength, MinLength, IsArray, IsIn } from 'class-validator';
+import {
+  IsBoolean,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+  IsArray,
+  IsIn,
+} from 'class-validator';
 
 export class ProductKnowledgeDto {
   @IsOptional()
@@ -52,6 +60,7 @@ export class CreateProductSpaceDto {
 }
 
 export class UpdateProductSpaceDto {
+  @IsOptional() @IsBoolean() cloudProcessingEnabled?: boolean;
   @IsOptional()
   @IsString()
   @MinLength(1)

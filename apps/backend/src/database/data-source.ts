@@ -1,3 +1,4 @@
+import { databaseTls } from './tls.config';
 import { DataSource } from 'typeorm';
 
 /**
@@ -16,7 +17,7 @@ export default new DataSource({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   entities: ['src/**/*.entity.ts'],
-  migrations: ['src/database/migrations/*{.ts,.js}'],
+  migrations: ['src/database/migrations/[0-9]*{.ts,.js}'],
   synchronize: false,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl: databaseTls(process.env.DATABASE_URL, process.env.DB_HOST, process.env.DB_TLS),
 });

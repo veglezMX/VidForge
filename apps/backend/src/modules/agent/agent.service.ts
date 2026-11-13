@@ -1,3 +1,5 @@
+import { CloudPolicyService } from '../ai/services/cloud-policy.service';
+import { GatewayVideoService } from '../ai/services/gateway-video.service';
 import {
   BadRequestException,
   Injectable,
@@ -32,6 +34,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     `${this.isWorker ? 'agent' : 'api'}-${process.pid}`;
   private recoveryTimer: ReturnType<typeof setInterval> | undefined;
   constructor(
+    private readonly consent: CloudPolicyService,
+    private readonly gateway: GatewayVideoService,
     @InjectRepository(AgentRun)
     private readonly runRepo: Repository<AgentRun>,
     private readonly orchestrator: OrchestratorService,
@@ -47,8 +51,9 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
    * a terminal failure, so a worker restart can resume its LangGraph thread.
    */
   async onModuleInit(): Promise<void> {
-    this.outboxService?.registerAgentFallback((payload) =>
-      this.executeQueuedRun(payload.taskId, payload)
+    this.outboxService?.registerAgentFallback(
+      (payload) => this.executeQueuedRun(payload.taskId, payload),
+      (payload) => this.authorizeDispatch(payload.taskId)
     );
     if (!this.isWorker) return;
 
@@ -114,6 +119,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
 
   /** Start a durable background run and return before model/media work begins. */
   async run(dto: RunAgentDto, rawIdempotencyKey?: string): Promise<AgentResult> {
+    await this.consent.assert({ userId: dto.userId, productSpaceId: dto.productSpaceId });
     const idempotencyKey = this.normalizeIdempotencyKey(rawIdempotencyKey);
     if (idempotencyKey) {
       const existing = await this.runRepo.findOne({
@@ -274,6 +280,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   async replay(userId: string, taskId: string): Promise<{ taskId: string; status: 'pending' }> {
     const run = await this.runRepo.findOne({ where: { id: taskId, userId } });
     if (!run) throw new NotFoundException('Agent 任务不存在');
+    await this.consent.assert({ userId, productSpaceId: run.input.productSpaceId as string });
     if (!['failed', 'paused', 'cancelled'].includes(run.status)) {
       throw new BadRequestException('只有失败、暂停或取消的运行可以 replay');
     }
@@ -320,6 +327,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   ): Promise<{ taskId: string; status: 'pending'; parentRunId: string }> {
     const parent = await this.runRepo.findOne({ where: { id: taskId, userId } });
     if (!parent) throw new NotFoundException('Agent 任务不存在');
+    await this.consent.assert({ userId, productSpaceId: parent.input.productSpaceId as string });
     if (!this.checkpointService || !parent.graphThreadId) {
       throw new BadRequestException('该运行没有配置 LangGraph checkpointer');
     }
@@ -413,6 +421,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     if (this.isTerminal(run.status)) return { cancelled: false };
 
     const cancelled = this.orchestrator.cancel(taskId);
+    await this.gateway.cancelRun(taskId, userId);
     await this.runRepo.update(taskId, {
       status: 'cancelled',
       currentNode: 'cancelled',
@@ -512,6 +521,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   ): Promise<{ taskId: string; status: 'pending' }> {
     const run = await this.runRepo.findOne({ where: { id: taskId, userId } });
     if (!run) throw new NotFoundException('Agent 任务不存在');
+    await this.consent.assert({ userId, productSpaceId: run.input.productSpaceId as string });
     if (run.status !== 'paused' || run.currentNode !== 'human_review') {
       throw new BadRequestException('Agent 任务当前不在等待人工审核状态');
     }
@@ -562,10 +572,21 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     return { taskId, status: 'pending' };
   }
 
+  private async authorizeDispatch(taskId: string): Promise<void> {
+    const run = await this.runRepo.findOne({ where: { id: taskId } });
+    if (!run) throw new NotFoundException('Agent task unavailable');
+    await this.consent.assert({
+      userId: run.userId,
+      productSpaceId: run.input?.productSpaceId as string,
+      runId: taskId,
+    });
+  }
+
   private async dispatch(
     taskId: string,
     payload: AgentDispatchPayload = { taskId, mode: 'initial' }
   ): Promise<void> {
+    await this.authorizeDispatch(taskId);
     const fallback = () => this.executeQueuedRun(taskId, payload);
     if (!this.queueRunner) {
       // Unit-test / minimal embedding fallback. The real Nest application

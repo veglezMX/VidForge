@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { Modal } from 'antd';
-import { KeyboardOutlined } from '@ant-design/icons';
+import { KeyOutlined } from '@ant-design/icons';
 
 const SHORTCUTS = [
   { keys: 'Ctrl+S', label: '保存当前页面' },
@@ -45,7 +45,7 @@ export function GlobalShortcuts() {
     <Modal
       title={
         <>
-          <KeyboardOutlined /> 快捷键
+          <KeyOutlined /> 快捷键
         </>
       }
       open={helpOpen}

@@ -219,7 +219,7 @@ export function CostOverviewCard({ refreshIntervalMs = 30000 }: Props) {
                   marginTop: 4,
                 }}
               >
-                缓存命中可降低 token 成本 ~70%（火山方舟 Prompt Cache）
+                费用以网关账单为准
               </Text>
             </div>
           </Space>

@@ -13,6 +13,7 @@ import {
   message,
   Spin,
   Empty,
+  Switch,
 } from 'antd';
 import { PlusOutlined, FolderOpenOutlined, AppstoreOutlined } from '@ant-design/icons';
 import { GlassPanel } from '../../components/studio/GlassPanel';
@@ -71,6 +72,24 @@ export default function WorkspaceListPage() {
     }
   };
 
+  const changeCloud = async (id: string, enabled: boolean) => {
+    const apply = async () => {
+      try {
+        upsert(await spaceApi.update(id, { cloudProcessingEnabled: enabled }));
+      } catch {
+        message.error('Could not update cloud processing');
+      }
+    };
+    if (enabled)
+      Modal.confirm({
+        title: 'Enable cloud processing?',
+        content:
+          'Prompts, narration, images and sampled video frames may be sent to configured external providers. Text-only shots incur an image generation charge before video generation. Gateway retention cannot delete provider copies.',
+        onOk: apply,
+      });
+    else await apply();
+  };
+
   return (
     <div className="page-enter" style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div
@@ -103,6 +122,28 @@ export default function WorkspaceListPage() {
         </Button>
       </div>
 
+      <div style={{ marginBottom: 24 }}>
+        {spaces.map((project) => (
+          <div
+            key={project.id}
+            style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}
+          >
+            <Switch
+              aria-label={`Cloud processing for ${project.name}`}
+              checked={project.cloudProcessingEnabled === true}
+              onChange={(enabled) => void changeCloud(project.id, enabled)}
+            />
+            <Text>
+              {project.name}: cloud processing{' '}
+              {project.cloudProcessingEnabled ? 'enabled' : 'disabled'}
+            </Text>
+          </div>
+        ))}
+        <Paragraph type="secondary">
+          Uploads stay local. Disabling cloud processing stops new stages and requests cancellation;
+          data already sent cannot be recalled.
+        </Paragraph>
+      </div>
       {loading && !loaded && (
         <div style={{ textAlign: 'center', padding: 60 }}>
           <Spin size="large" />

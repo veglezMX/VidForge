@@ -63,7 +63,12 @@ test('agent service creates a pending durable run and returns immediately', asyn
     }),
     cancel: () => true,
   };
-  const service = new AgentService(repo as never, orchestrator as never);
+  const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
+    repo as never,
+    orchestrator as never
+  );
   const result = await service.run({
     userId: 'user-1',
     productName: '商品',
@@ -104,6 +109,8 @@ test('agent run returns the existing task for a repeated idempotency key', async
       options.where?.idempotencyKey ? existing : null,
   };
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never
   );
@@ -125,6 +132,8 @@ test('agent run rejects an oversized idempotency key instead of truncating it', 
     save: async () => undefined,
   };
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never
   );
@@ -141,6 +150,8 @@ test('agent run rejects an oversized idempotency key instead of truncating it', 
 test('agent status is scoped to the authenticated user', async () => {
   const repo = createRepo();
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never
   );
@@ -180,6 +191,8 @@ test('agent audit returns a compact checkpoint timeline and owner-scoped provide
     ],
   };
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never,
     undefined,
@@ -217,6 +230,8 @@ test('agent worker requeues expired leases for checkpoint resume', async () => {
     },
   };
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never
   );
@@ -258,6 +273,8 @@ test('agent startup leaves a worker-owned run alone while its lease is valid', a
     },
   };
   const service = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
     repo as never,
     { run: async () => ({}), cancel: () => false } as never
   );
@@ -304,8 +321,18 @@ test('two workers racing for one pending run execute the graph only once', async
     },
     cancel: () => false,
   };
-  const workerA = new AgentService(repo as never, orchestrator as never);
-  const workerB = new AgentService(repo as never, orchestrator as never);
+  const workerA = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
+    repo as never,
+    orchestrator as never
+  );
+  const workerB = new AgentService(
+    { assert: async () => {} } as never,
+    { cancelRun: async () => {} } as never,
+    repo as never,
+    orchestrator as never
+  );
 
   await Promise.all([workerA.executeQueuedRun('task-race'), workerB.executeQueuedRun('task-race')]);
 

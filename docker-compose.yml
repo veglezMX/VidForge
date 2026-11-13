@@ -7,9 +7,9 @@ services:
     environment:
       POSTGRES_DB: vidforge
       POSTGRES_USER: vidforge
-      POSTGRES_PASSWORD: vidforge-local
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Run scripts/setup-local-secrets.mjs}
     ports:
-      - '5432:5432'
+      - '127.0.0.1:55432:5432'
     volumes:
       - vidforge-postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
@@ -22,13 +22,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ['redis-server', '--appendonly', 'yes']
+    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${REDIS_PASSWORD:?Run scripts/setup-local-secrets.mjs}']
     ports:
-      - '6379:6379'
+      - '127.0.0.1:56379:6379'
     volumes:
       - vidforge-redis-data:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
       interval: 5s
       timeout: 3s
       retries: 12

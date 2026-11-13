@@ -60,7 +60,7 @@ export class ExportService {
   async create(userId: string, dto: CreateExportDto): Promise<ExportTask> {
     const creation = await this.creationRepo.findOne({ where: { id: dto.creationTaskId } });
     if (!creation) throw new NotFoundException('源创作任务不存在');
-    if (creation.userId && creation.userId !== userId) {
+    if (creation.userId !== userId) {
       throw new ForbiddenException('无权导出该任务');
     }
     if (creation.status !== 'completed') {
@@ -144,7 +144,7 @@ export class ExportService {
       const localSource = path.join(workdir, 'source.mp4');
       // 当 sourceUrl 是本地 /static/... 路径时,我们其实可以直接 localFile,
       // 但走一遍 download 既支持本地也支持外链(ARK 的远程 OSS URL)
-      await this.ffmpeg.downloadTo(this.normalizeUrl(sourceUrl), localSource);
+      await this.storage.copyOwned(sourceUrl, task.userId, localSource);
       await this.updateProgress(taskId, 30, 'downloaded');
       await this.assertActive(taskId);
 
@@ -163,7 +163,7 @@ export class ExportService {
 
       // ── Step 3: 发布产物 ─────────────────────────────
       const publishName = `${taskId}.${ext}`;
-      const published = await this.storage.publish(localOut, 'export', publishName);
+      const published = await this.storage.publish(localOut, 'export', publishName, task.userId);
       await this.updateProgress(taskId, 95, 'published');
       await this.assertActive(taskId);
 

@@ -1,3 +1,6 @@
+import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
+import { DataSource } from 'typeorm';
+import { CreationTask } from '../entities/creation-task.entity';
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -23,25 +26,11 @@ import { Logger } from '@nestjs/common';
  *   若未来分镜数 >20 导致消息风暴,可在 emitShotProgress 内加 throttle(1s)
  */
 @WebSocketGateway({
+  namespace: '/creation',
   cors: {
-    // 与 main.ts 中 HTTP CORS 对齐：放开所有 *.vercel.app 子域 + 配置的 WEB_BASE_URL + 同源
-    origin: (
-      origin: string | undefined,
-      callback: (err: Error | null, allow?: boolean) => void
-    ) => {
-      if (!origin) return callback(null, true);
-      const allowed = (process.env.WEB_BASE_URL ?? '')
-        .split(',')
-        .map((o) => o.trim())
-        .filter(Boolean);
-      if (allowed.includes(origin)) return callback(null, true);
-      if (/^https?:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return callback(null, true);
-      if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/i.test(origin)) return callback(null, true);
-      return callback(new Error(`WS CORS blocked: ${origin}`), false);
-    },
+    origin: (process.env.WEB_BASE_URL || 'http://localhost:3000').split(','),
     credentials: true,
   },
-  namespace: '/creation',
 })
 export class CreationGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(CreationGateway.name);
@@ -49,36 +38,62 @@ export class CreationGateway implements OnGatewayConnection, OnGatewayDisconnect
   @WebSocketServer()
   server: Server;
 
-  handleConnection(client: Socket) {
-    this.logger.log(`客户端连接: ${client.id}`);
+  constructor(
+    private readonly auth: JwtAuthGuard,
+    private readonly db: DataSource
+  ) {}
+  async handleConnection(client: Socket) {
+    try {
+      await this.auth.verify(client.handshake.auth?.token || '');
+    } catch {
+      client.disconnect(true);
+    }
   }
-
-  handleDisconnect(client: Socket) {
-    this.logger.log(`客户端断开: ${client.id}`);
-  }
-
+  handleDisconnect(_client: Socket) {}
   @SubscribeMessage('subscribe')
-  handleSubscribe(client: Socket, taskId: string) {
-    client.join(`task:${taskId}`);
-    this.logger.log(`客户端 ${client.id} 订阅任务: ${taskId}`);
+  async handleSubscribe(client: Socket, taskId: string) {
+    try {
+      const user = await this.auth.verify(client.handshake.auth?.token || '');
+      if (
+        typeof taskId !== 'string' ||
+        !(await this.db.getRepository(CreationTask).findOneBy({ id: taskId, userId: user.sub }))
+      )
+        throw new Error();
+      await client.join(`task:${taskId}`);
+      return { subscribed: true };
+    } catch {
+      client.disconnect(true);
+      return { subscribed: false };
+    }
   }
-
+  private async deliver(taskId: string, event: string, data: any) {
+    if (!this.server) return;
+    const sockets = await this.server.in(`task:${taskId}`).fetchSockets();
+    for (const socket of sockets) {
+      try {
+        await this.auth.verify(socket.handshake.auth?.token || '');
+        socket.emit(event, data);
+      } catch {
+        socket.disconnect(true);
+      }
+    }
+  }
   emitShotProgress(
     taskId: string,
     data: { shotId: string; progress: number; status: string; message?: string }
   ) {
-    this.server.to(`task:${taskId}`).emit('shot-progress', data);
+    void this.deliver(taskId, 'shot-progress', data);
   }
 
   emitProgress(taskId: string, data: { progress: number; status: string; message?: string }) {
-    this.server.to(`task:${taskId}`).emit('progress', data);
+    void this.deliver(taskId, 'progress', data);
   }
 
   emitComplete(taskId: string, data: any) {
-    this.server.to(`task:${taskId}`).emit('complete', data);
+    void this.deliver(taskId, 'complete', data);
   }
 
   emitError(taskId: string, error: string) {
-    this.server.to(`task:${taskId}`).emit('error', { message: error });
+    void this.deliver(taskId, 'error', { message: error });
   }
 }

@@ -1,667 +1,215 @@
-import {
-  Injectable,
-  Logger,
-  NotFoundException,
-  ForbiddenException,
-  Optional,
-} from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
+import { randomUUID } from 'node:crypto';
 import { CreationTask } from './entities/creation-task.entity';
 import { CreateTaskDto } from './dto/create-task.dto';
-import { CreationGateway } from './gateway/creation.gateway';
 import { RegenerateShotDto } from './dto/regenerate-shot.dto';
-import { ArkVideoService, VideoGenerationOptions } from '../ai/services/ark-video.service';
-import { ArkConfigService } from '../ai/services/ark-config.service';
-import { ComposerService, ComposeShotInput } from '../media/services/composer.service';
-import { TraceService } from '../trace/trace.service';
+import { CreationGateway } from './gateway/creation.gateway';
+import { GatewayVideoService } from '../ai/services/gateway-video.service';
+import { CloudPolicyService } from '../ai/services/cloud-policy.service';
+import { ComposerService } from '../media/services/composer.service';
 import { QueueRunnerService } from '../queue/queue-runner.service';
 import { JOB_NAMES, QUEUE_NAMES } from '../queue/queue.constants';
-import type { CreationComposeJob, CreationShotJob } from '../queue/queue.payloads';
-
-interface ShotState {
-  id: string;
-  index: number;
-  description: string;
-  voiceover?: string;
-  caption?: string;
-  duration?: number;
-  status: 'pending' | 'generating' | 'completed' | 'failed';
-  taskId?: string;
-  videoUrl?: string;
-  thumbnailUrl?: string;
-  errorMessage?: string;
-}
-
-/**
- * 轮询参数(网络与容错):
- * - POLL_INTERVAL_MS=4000: ARK 视频任务从 queued→succeeded 通常需 30-120s,
- *   4s 间隔在响应速度与 API 限频之间取得平衡
- * - POLL_TIMEOUT_MS=480000: 单分镜最长等待 8 分钟,超时抛异常并跳过该分镜,
- *   不阻塞后续分镜
- * - 断线重连:客户端 socket.io 自动重连后,通过 GET /creation/:id 补拉最新状态
- */
-const POLL_INTERVAL_MS = 4000;
-const POLL_TIMEOUT_MS = 8 * 60 * 1000; // 单分镜最多 8 分钟
 
 @Injectable()
-export class CreationService {
-  private readonly logger = new Logger(CreationService.name);
-  /** 标记某 taskId 是否被请求取消(进程内,任务跨进程时需 Redis pub/sub) */
-  private readonly cancelFlags = new Map<string, true>();
-
+export class CreationService implements OnModuleInit {
   constructor(
-    @InjectRepository(CreationTask)
-    private taskRepository: Repository<CreationTask>,
-    private creationGateway: CreationGateway,
-    private readonly arkVideoService: ArkVideoService,
-    private readonly arkConfigService: ArkConfigService,
+    @InjectRepository(CreationTask) private readonly tasks: Repository<CreationTask>,
+    private readonly events: CreationGateway,
+    private readonly video: GatewayVideoService,
+    private readonly consent: CloudPolicyService,
     private readonly composer: ComposerService,
-    private readonly traceService: TraceService,
-    @Optional() private readonly queueRunner?: QueueRunnerService
+    private readonly queue: QueueRunnerService
   ) {}
-
-  /**
-   * 取消任务 - 在轮询循环间隙生效。
-   * 注意:已经投递给 ARK 的请求不能撤回(ARK 计费仍会发生),
-   *       本接口只阻止 VidForge 这一侧继续发起新请求 + 跳过未完成分镜。
-   */
-  async cancel(userId: string, taskId: string): Promise<{ ok: true }> {
-    const task = await this.findOne(userId, taskId);
-    if (task.status === 'completed' || task.status === 'failed') {
-      return { ok: true };
-    }
-    this.cancelFlags.set(taskId, true);
-    await this.taskRepository.update(taskId, {
-      status: 'failed',
-      errorMessage: '用户取消',
-    });
-    this.creationGateway.emitError(taskId, '任务已取消');
-    this.logger.log(`[${taskId}] 用户取消任务`);
-    return { ok: true };
-  }
-
-  /** 内部检查是否被请求取消 */
-  private isCancelled(taskId: string): boolean {
-    return this.cancelFlags.has(taskId);
-  }
-
-  private async isCancelledInDatabase(taskId: string): Promise<boolean> {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
-    return !task || task.status === 'failed';
-  }
-
-  async createTask(userId: string, dto: CreateTaskDto): Promise<CreationTask> {
-    // 规范化 storyboard：补 id / 默认状态
-    const inputShots = Array.isArray(dto.storyboard) ? dto.storyboard : [];
-    const shots: ShotState[] = inputShots.slice(0, 5).map((s, i) => ({
-      id: String(s?.id ?? `shot_${Date.now()}_${i + 1}`),
-      index: typeof s?.index === 'number' ? s.index : i + 1,
-      description: String(s?.description ?? `${dto.title} 分镜 ${i + 1}`),
-      voiceover: s?.voiceover ? String(s.voiceover) : undefined,
-      caption: s?.caption ? String(s.caption) : undefined,
-      duration: typeof s?.duration === 'number' ? s.duration : 5,
-      status: 'pending',
-    }));
-
-    const task = this.taskRepository.create({
-      userId,
-      productSpaceId: dto.productSpaceId,
-      title: dto.title,
-      storyboard: shots as any,
-      status: 'pending',
-      progress: 0,
-      scriptId: (dto as any).scriptId,
-    });
-    const saved = await this.taskRepository.save(task);
-
-    // 入队不阻塞 HTTP 响应；生产环境由独立 Media Worker 消费。
-    const job: CreationShotJob = { taskId: saved.id, dto };
-    if (this.queueRunner) {
-      void this.queueRunner
-        .enqueue(
-          QUEUE_NAMES.CREATION_SHOT,
-          JOB_NAMES.GENERATE_SHOT,
-          job,
-          () => this.processShots(job.taskId, job.dto),
-          { jobId: `creation-shot:${saved.id}`, attempts: 3 }
-        )
-        .catch(async (err: any) => {
-          await this.fail(saved.id, `视频生成任务入队失败: ${err?.message ?? String(err)}`);
-        });
-    } else {
-      void this.processShots(job.taskId, job.dto).catch((err) => {
-        this.logger.error(`[${saved.id}] processShots 异常: ${err?.message ?? err}`);
-      });
-    }
-
-    return saved;
-  }
-
-  /**
-   * 真实视频生成主流程：
-   * 1) 校验配置 → 否则降级到模拟模式
-   * 2) 逐分镜创建 ARK 任务并轮询，期间通过 WS 推进度
-   * 3) 全部完成后写回 result，emitComplete
-   */
-  async processShots(taskId: string, dto: CreateTaskDto): Promise<void> {
-    const existing = await this.taskRepository.findOne({ where: { id: taskId } });
-    if (!existing || existing.status === 'completed' || existing.status === 'failed') return;
-
-    const hasArk = !!this.arkConfigService.getActiveApiKey('video');
-    if (!hasArk) {
-      this.logger.warn(`[${taskId}] 未配置 ARK 视频模型，使用降级模拟流程`);
-      return this.processMock(taskId);
-    }
-
-    const task = existing;
-    if (!task) return;
-
-    const shots: ShotState[] = (task.storyboard as any[]) ?? [];
-    if (shots.length === 0) {
-      await this.fail(taskId, '分镜列表为空');
-      return;
-    }
-
-    task.status = 'processing';
-    task.progress = 5;
-    await this.taskRepository.save(task);
-    this.creationGateway.emitProgress(taskId, {
-      progress: 5,
-      status: 'processing',
-      message: `开始生成 ${shots.length} 个分镜...`,
-    });
-
-    const aspectRatio = (dto.aspectRatio as VideoGenerationOptions['ratio']) || '9:16';
-    const resolution = (dto.quality as VideoGenerationOptions['resolution']) || '720p';
-
-    for (let i = 0; i < shots.length; i++) {
-      // 取消检查 - 进入下一个分镜前确认
-      if (this.isCancelled(taskId) || (await this.isCancelledInDatabase(taskId))) {
-        this.logger.warn(`[${taskId}] 检测到取消标志,中止后续分镜生成`);
-        return;
-      }
-      const shot = shots[i];
-      if (shot.status === 'completed' && shot.videoUrl) continue;
-      const shotProgressBase = 5 + Math.floor((i / shots.length) * 90);
-
-      shot.status = 'generating';
-      await this.persistShots(taskId, shots);
-      this.creationGateway.emitShotProgress(taskId, {
-        shotId: shot.id,
-        progress: 0,
-        status: 'generating',
-        message: `分镜 ${shot.index}：创建生成任务...`,
-      });
-      this.creationGateway.emitProgress(taskId, {
-        progress: shotProgressBase,
-        status: 'processing',
-        message: `分镜 ${i + 1}/${shots.length}：创建生成任务...`,
-      });
-
-      try {
-        const arkPrompt = this.buildShotPrompt(shot, dto.title, aspectRatio, resolution);
-        if (!shot.taskId) {
-          const created = await this.arkVideoService.createTask({
-            prompt: arkPrompt,
-            ratio: aspectRatio,
-            resolution,
-            duration: shot.duration,
+  async onModuleInit() {
+    for (const task of await this.tasks.findBy({ status: In(['pending', 'processing']) })) {
+      const dto = (task.result as any)?.generationOptions;
+      if (dto) {
+        try {
+          await this.consent.assert(this.context(task));
+        } catch {
+          await this.tasks.update(task.id, {
+            status: 'failed',
+            errorMessage:
+              'Cloud processing is disabled; start an explicit new run after enabling it',
           });
-          shot.taskId = created.id;
-          await this.persistShots(taskId, shots);
+          continue;
         }
-
-        const finalState = await this.pollUntilDone(
-          taskId,
-          shot,
-          shotProgressBase,
-          shots.length,
-          i
-        );
-        shot.videoUrl = finalState.videoUrl;
-        shot.thumbnailUrl = finalState.thumbnailUrl;
-        shot.status = 'completed';
-        await this.persistShots(taskId, shots);
-        this.creationGateway.emitShotProgress(taskId, {
-          shotId: shot.id,
-          progress: 100,
-          status: 'completed',
-          message: `分镜 ${shot.index} 生成完成`,
-        });
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        this.logger.error(`[${taskId}] 分镜 ${shot.index} 生成失败: ${msg}`);
-        shot.status = 'failed';
-        shot.errorMessage = msg;
-        await this.persistShots(taskId, shots);
-        this.creationGateway.emitShotProgress(taskId, {
-          shotId: shot.id,
-          progress: 0,
-          status: 'failed',
-          message: `分镜 ${shot.index} 失败: ${msg}`,
-        });
-        // 单分镜失败不中止整体（让其他分镜尽力完成）
+        await this.enqueue(task.id, dto);
       }
     }
-
-    const successCount = shots.filter((s) => s.status === 'completed').length;
-    if (successCount === 0) {
-      await this.fail(taskId, '所有分镜均生成失败');
-      return;
-    }
-
-    const readyTask = await this.taskRepository.findOneOrFail({ where: { id: taskId } });
-    if (await this.isCancelledInDatabase(taskId)) return;
-    readyTask.status = 'processing';
-    readyTask.progress = 95;
-    await this.taskRepository.save(readyTask);
-    await this.enqueueComposition({ taskId, dto });
   }
-
-  /** 独立合片 Worker 执行体；可安全重试，完成态任务不会重复发布产物。 */
-  async processComposition(taskId: string, dto: CreateTaskDto): Promise<void> {
-    const task = await this.taskRepository.findOne({ where: { id: taskId } });
-    if (!task || task.status === 'completed' || task.status === 'failed') return;
-
-    const shots: ShotState[] = (task.storyboard as any[]) ?? [];
-    const successShots: ComposeShotInput[] = shots
-      .filter((s) => s.status === 'completed' && s.videoUrl)
-      .map((s) => ({
-        id: s.id,
-        index: s.index,
-        videoUrl: s.videoUrl!,
-        duration: s.duration,
-        caption: s.caption,
-        voiceover: s.voiceover,
-      }));
-    if (successShots.length === 0) {
-      await this.fail(taskId, '合片前没有可用分镜');
-      return;
-    }
-    if (await this.isCancelledInDatabase(taskId)) return;
-
-    this.creationGateway.emitProgress(taskId, {
-      progress: 95,
-      status: 'processing',
-      message: '所有分镜生成完成,开始合片...',
-    });
-
-    const aspectRatio = (dto.aspectRatio as VideoGenerationOptions['ratio']) || '9:16';
-    const resolution = (dto.quality as VideoGenerationOptions['resolution']) || '720p';
-    const composeRatio: '9:16' | '16:9' | '1:1' =
-      aspectRatio === '16:9' || aspectRatio === '9:16' || aspectRatio === '1:1'
-        ? aspectRatio
-        : '9:16';
-    const composeRes: '480p' | '720p' | '1080p' | '2160p' =
-      resolution === '480p' || resolution === '720p' || resolution === '1080p'
-        ? resolution
-        : '720p';
-
-    let composeUrl = successShots[0]?.videoUrl ?? '';
-    let composeDuration = shots.reduce((sum, s) => sum + (s.duration ?? 0), 0);
-    let composeMeta: Record<string, unknown> = { mode: 'shot-only' };
-    try {
-      const compositionStartedAt = new Date();
-      const composed = await this.composer.compose(successShots, {
-        taskId,
-        title: task.title,
-        ratio: composeRatio,
-        resolution: composeRes,
-        style: dto.style,
-        burnSubtitle: dto.burnSubtitle !== false,
-        onProgress: (p, msg) => {
-          const mapped = 95 + Math.min(4, Math.floor(p / 25));
-          this.creationGateway.emitProgress(taskId, {
-            progress: mapped,
-            status: 'processing',
-            message: `合片: ${msg}`,
-          });
-        },
-      });
-      composeUrl = composed.finalUrl;
-      composeDuration = composed.durationSec;
-      composeMeta = {
-        mode: 'composed',
-        fileSize: composed.fileSize,
-        checksumSha256: composed.checksumSha256,
-        traceTaskId: taskId,
-        hasVoiceover: composed.hasVoiceover,
-        hasBgm: composed.hasBgm,
-        subtitleBurned: composed.subtitleBurned,
-      };
-      void this.traceService.recordSpan({
-        userId: task.userId,
-        taskId,
-        scope: 'creation',
-        span: 'video_composition',
-        startedAt: compositionStartedAt,
-        status: 'ok',
-        model: 'ffmpeg',
-        summary: '视频合片与产物发布完成',
-        metadata: {
-          artifactUrl: composed.finalUrl,
-          artifactSha256: composed.checksumSha256,
-          artifactSizeBytes: composed.fileSize,
-          artifactDurationSec: composed.durationSec,
-        },
-      });
-      this.logger.log(`[${taskId}] 合片完成 ${composed.finalUrl} (${composed.fileSize}B)`);
-    } catch (err: any) {
-      this.logger.error(`[${taskId}] 合片失败,使用首段预览: ${err?.message ?? err}`);
-      composeMeta = { mode: 'shot-only-fallback', error: err?.message ?? String(err) };
-    }
-
-    if (await this.isCancelledInDatabase(taskId)) return;
-
-    const finalTask = await this.taskRepository.findOneOrFail({ where: { id: taskId } });
-    finalTask.status = 'completed';
-    finalTask.progress = 100;
-    finalTask.result = {
-      shots: shots.map((s) => ({
-        id: s.id,
-        index: s.index,
-        videoUrl: s.videoUrl,
-        thumbnailUrl: s.thumbnailUrl,
-        status: s.status,
-        errorMessage: s.errorMessage,
-      })),
-      url: composeUrl,
-      duration: composeDuration,
-      successCount: successShots.length,
-      totalCount: shots.length,
-      compose: composeMeta,
-    };
-    await this.taskRepository.save(finalTask);
-    this.creationGateway.emitComplete(taskId, {
-      progress: 100,
-      status: 'completed',
-      result: finalTask.result,
-    });
-    this.logger.log(
-      `[${taskId}] 任务完成:${successShots.length}/${shots.length} 分镜成功 (合片: ${composeMeta.mode})`
-    );
-  }
-
-  private async enqueueComposition(job: CreationComposeJob): Promise<void> {
-    if (this.queueRunner) {
-      await this.queueRunner.enqueue(
-        QUEUE_NAMES.CREATION_COMPOSE,
-        JOB_NAMES.COMPOSE_VIDEO,
-        job,
-        () => this.processComposition(job.taskId, job.dto),
-        { jobId: `creation-compose:${job.taskId}`, attempts: 3 }
-      );
-      return;
-    }
-    void this.processComposition(job.taskId, job.dto).catch((err) => {
-      this.logger.error(`[${job.taskId}] processComposition 异常: ${err?.message ?? err}`);
+  async findAll(userId: string, spaceId?: string) {
+    return this.tasks.find({
+      where: { userId, ...(spaceId ? { productSpaceId: spaceId } : {}) },
+      order: { createdAt: 'DESC' },
+      take: 50,
     });
   }
-
-  /**
-   * 轮询单个分镜的 ARK 任务直到 succeeded/failed/timeout
-   *
-   * 消息批处理策略:
-   * - 每 4s 发一次 progress + shot-progress 双事件,对外看起来是"实时"更新
-   * - 内部实际每 2 次轮询才 emit 一次(即每 8s 真正发消息),
-   *   降低 WebSocket 帧开销;UI 动画在客户端用 CSS transition 填充间隔
-   * - 最后一条(终态)始终 emit,无论间隔
-   */
-  private async pollUntilDone(
-    taskId: string,
-    shot: ShotState,
-    shotProgressBase: number,
-    totalShots: number,
-    shotIndex: number
-  ): Promise<{ videoUrl?: string; thumbnailUrl?: string }> {
-    if (!shot.taskId) throw new Error('shot.taskId 缺失');
-
-    const startedAt = Date.now();
-    let polls = 0;
-    for (;;) {
-      if (this.isCancelled(taskId) || (await this.isCancelledInDatabase(taskId))) {
-        throw new Error('任务已被用户取消');
-      }
-      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-        throw new Error(`分镜 ${shot.index} 轮询超时`);
-      }
-
-      await this.delay(POLL_INTERVAL_MS);
-      polls += 1;
-
-      const remote = await this.arkVideoService.queryTask(shot.taskId);
-      const status: string = remote?.status ?? 'pending';
-      // ARK 视频任务的 status 文档：queued / running / succeeded / failed / cancelled
-      const normalizedStatus = String(status).toLowerCase();
-
-      // 估算当前分镜进度（在 [shotProgressBase, shotProgressBase+90/totalShots] 区间内推进）
-      const slotWidth = 90 / totalShots;
-      const within = Math.min(0.9, polls * 0.1); // 每次轮询逼近 10%，封顶 90%
-      const overall = Math.round(shotProgressBase + within * slotWidth);
-
-      this.creationGateway.emitProgress(taskId, {
-        progress: overall,
-        status: 'processing',
-        message: `分镜 ${shotIndex + 1}/${totalShots}：${this.statusLabel(normalizedStatus)}`,
-      });
-      this.creationGateway.emitShotProgress(taskId, {
-        shotId: shot.id,
-        progress: Math.round(within * 100),
-        status: 'generating',
-        message: this.statusLabel(normalizedStatus),
-      });
-
-      if (normalizedStatus === 'succeeded' || normalizedStatus === 'success') {
-        const content = remote?.content ?? remote?.result ?? {};
-        const videoUrl: string | undefined =
-          content?.video_url ?? content?.url ?? remote?.video_url ?? remote?.url;
-        const thumbnailUrl: string | undefined = content?.thumbnail_url ?? remote?.thumbnail_url;
-        if (!videoUrl) {
-          throw new Error('ARK 返回成功但缺少视频 URL');
-        }
-        return { videoUrl, thumbnailUrl };
-      }
-      if (normalizedStatus === 'failed' || normalizedStatus === 'cancelled') {
-        const errMsg = remote?.error?.message ?? remote?.message ?? `任务状态: ${normalizedStatus}`;
-        throw new Error(errMsg);
-      }
-      // 其他状态继续轮询
-    }
-  }
-
-  /** 把分镜描述拼成给视频模型的 prompt（V0 纯文本驱动） */
-  private buildShotPrompt(
-    shot: ShotState,
-    title: string,
-    ratio: VideoGenerationOptions['ratio'],
-    resolution: VideoGenerationOptions['resolution']
-  ): string {
-    const parts: string[] = [];
-    parts.push(`【主题】${title}`);
-    parts.push(`【画面】${shot.description}`);
-    if (shot.caption) parts.push(`【屏幕字幕】${shot.caption}`);
-    parts.push(`【时长】约 ${shot.duration ?? 5} 秒`);
-    parts.push(`【画幅】${ratio ?? '9:16'} | ${resolution ?? '720p'}`);
-    parts.push('风格：电商带货短视频，画面干净专业，光线自然，构图聚焦商品');
-    return parts.join('\n');
-  }
-
-  private statusLabel(status: string): string {
-    switch (status) {
-      case 'queued':
-      case 'pending':
-        return '排队中';
-      case 'running':
-      case 'processing':
-        return '生成中';
-      case 'succeeded':
-      case 'success':
-        return '生成完成';
-      case 'failed':
-        return '生成失败';
-      case 'cancelled':
-        return '已取消';
-      default:
-        return status;
-    }
-  }
-
-  private async persistShots(taskId: string, shots: ShotState[]): Promise<void> {
-    await this.taskRepository.update(taskId, { storyboard: shots as any });
-  }
-
-  private async fail(taskId: string, message: string): Promise<void> {
-    await this.taskRepository.update(taskId, {
-      status: 'failed',
-      errorMessage: message,
-    });
-    this.creationGateway.emitError(taskId, message);
-  }
-
-  /**
-   * 当未配置 ARK 时使用的演示模拟流程（保留兼容性，比赛 demo 也可作 fallback）
-   */
-  private async processMock(taskId: string): Promise<void> {
-    const stages = [
-      { progress: 10, message: '正在分析素材...' },
-      { progress: 25, message: '正在生成分镜...' },
-      { progress: 45, message: '正在渲染视频...' },
-      { progress: 65, message: '正在添加配音...' },
-      { progress: 80, message: '正在合成字幕...' },
-      { progress: 95, message: '正在优化输出...' },
-    ];
-
-    for (const stage of stages) {
-      await this.delay(1500);
-      const task = await this.taskRepository.findOneOrFail({ where: { id: taskId } });
-      task.status = 'processing';
-      task.progress = stage.progress;
-      await this.taskRepository.save(task);
-
-      this.creationGateway.emitProgress(taskId, {
-        progress: stage.progress,
-        status: 'processing',
-        message: stage.message,
-      });
-    }
-
-    const task = await this.taskRepository.findOneOrFail({ where: { id: taskId } });
-    task.status = 'completed';
-    task.progress = 100;
-    task.result = { url: '', duration: 15, mock: true } as any;
-    await this.taskRepository.save(task);
-
-    this.creationGateway.emitComplete(taskId, {
-      progress: 100,
-      status: 'completed',
-      result: task.result,
-    });
-  }
-
-  async findAll(userId: string, productSpaceId?: string): Promise<CreationTask[]> {
-    const where: any = { userId };
-    if (productSpaceId) where.productSpaceId = productSpaceId;
-    return this.taskRepository.find({ where, order: { createdAt: 'DESC' } });
-  }
-
-  async findOne(userId: string, id: string): Promise<CreationTask> {
-    const task = await this.taskRepository.findOne({ where: { id } });
-    if (!task) throw new NotFoundException('任务不存在');
-    if (task.userId && task.userId !== userId) {
-      throw new ForbiddenException('无权访问该任务');
-    }
+  async findOne(userId: string, id: string) {
+    const task = await this.tasks.findOneBy({ id });
+    if (!task) throw new NotFoundException('Task unavailable');
+    if (task.userId !== userId) throw new ForbiddenException();
     return task;
   }
-
-  /**
-   * 单分镜重新生成：复用真实 ARK 流程
-   */
+  private context(task: CreationTask) {
+    return { userId: task.userId, productSpaceId: task.productSpaceId, runId: task.id };
+  }
+  async createTask(userId: string, dto: CreateTaskDto) {
+    await this.consent.assert({ userId, productSpaceId: dto.productSpaceId });
+    const input = Array.isArray(dto.storyboard) ? dto.storyboard : [];
+    if (!input.length || input.length > 5) throw new Error('Provide 1–5 shots');
+    const storyboard = input.map((s: any, i) => ({
+      id: randomUUID(),
+      index: i + 1,
+      description: String(s.description || ''),
+      voiceover: String(s.voiceover || ''),
+      caption: String(s.caption || ''),
+      duration: Number(s.duration || 5.0625),
+      materialId: typeof s.materialId === 'string' ? s.materialId : undefined,
+      status: 'pending',
+      revision: 0,
+    }));
+    const saved = await this.tasks.save(
+      this.tasks.create({
+        userId,
+        productSpaceId: dto.productSpaceId,
+        title: dto.title,
+        storyboard,
+        status: 'pending',
+        progress: 0,
+        result: { generationOptions: dto },
+      })
+    );
+    await this.enqueue(saved.id, dto);
+    return saved;
+  }
+  private async enqueue(taskId: string, dto: CreateTaskDto) {
+    const task = await this.tasks.findOneByOrFail({ id: taskId });
+    await this.consent.assert(this.context(task));
+    const revision = (task.storyboard || []).reduce(
+      (sum: number, shot: any) => sum + (shot.revision || 0),
+      0
+    );
+    await this.queue.enqueue(
+      QUEUE_NAMES.CREATION_SHOT,
+      JOB_NAMES.GENERATE_SHOT,
+      { taskId, dto },
+      () => this.processShots(taskId, dto),
+      { jobId: `creation-shot:${taskId}:${revision}`, attempts: 3 }
+    );
+  }
+  async processShots(taskId: string, dto: CreateTaskDto) {
+    const task = await this.tasks.findOneBy({ id: taskId });
+    if (!task || ['completed', 'failed'].includes(task.status)) return;
+    const context = this.context(task);
+    await this.consent.assert(context);
+    await this.tasks.update(taskId, { status: 'processing' });
+    const shots: any[] = task.storyboard || [];
+    for (const shot of shots) {
+      if (shot.status === 'completed' && shot.videoUrl) continue;
+      await this.consent.assert(context);
+      if (shot.taskId && !shot.provider)
+        throw new Error('Historical provider job requires an explicit new run');
+      shot.status = 'generating';
+      shot.provider = 'media-gateway';
+      await this.tasks.update(taskId, { storyboard: shots });
+      try {
+        shot.videoUrl = await this.video.generateVideo({
+          context,
+          operationKey: `${taskId}:${shot.id}:${shot.revision || 0}`,
+          prompt: shot.description,
+          duration: shot.duration,
+          materialId: shot.materialId,
+        });
+        shot.status = 'completed';
+      } catch (error: any) {
+        shot.errorMessage = error.message;
+        await this.tasks.update(taskId, { storyboard: shots, errorMessage: error.message });
+        throw error;
+      }
+      await this.consent.assert(context);
+      await this.tasks.update(taskId, {
+        storyboard: shots,
+        progress: Math.floor(
+          (shots.filter((s) => s.status === 'completed').length / shots.length) * 90
+        ),
+      });
+      this.events.emitShotProgress(taskId, { shotId: shot.id, status: 'completed', progress: 100 });
+    }
+    await this.queue.enqueue(
+      QUEUE_NAMES.CREATION_COMPOSE,
+      JOB_NAMES.COMPOSE_VIDEO,
+      { taskId, dto },
+      () => this.processComposition(taskId, dto),
+      {
+        jobId: `creation-compose:${taskId}:${shots.reduce((sum, s) => sum + (s.revision || 0), 0)}`,
+        attempts: 3,
+      }
+    );
+  }
+  async processComposition(taskId: string, dto: CreateTaskDto) {
+    const task = await this.tasks.findOneBy({ id: taskId });
+    if (!task || ['completed', 'failed'].includes(task.status)) return;
+    const context = this.context(task);
+    await this.consent.assert(context);
+    const shots: any[] = task.storyboard || [];
+    if (shots.some((s) => s.status !== 'completed'))
+      throw new Error('All shots must complete before composition');
+    const output = await this.composer.compose(shots, {
+      ...context,
+      taskId,
+      title: task.title,
+      ratio: (['16:9', '1:1'].includes(dto.aspectRatio) ? dto.aspectRatio : '9:16') as any,
+      resolution: (dto.quality || '720p') as any,
+      style: dto.style,
+      burnSubtitle: dto.burnSubtitle !== false,
+    });
+    await this.consent.assert(context);
+    const result = {
+      generationOptions: dto,
+      url: output.finalUrl,
+      shots,
+      duration: output.durationSec,
+      successCount: shots.length,
+      totalCount: shots.length,
+    };
+    await this.tasks.update(
+      { id: taskId, status: 'processing' },
+      { status: 'completed', progress: 100, result: result as any }
+    );
+    this.events.emitComplete(taskId, { status: 'completed', progress: 100, result: result as any });
+  }
+  async cancel(userId: string, taskId: string): Promise<{ ok: true }> {
+    const task = await this.findOne(userId, taskId);
+    if (['completed', 'failed'].includes(task.status)) return { ok: true };
+    await this.tasks.update(taskId, { status: 'failed', errorMessage: 'Cancelled' });
+    await this.video.cancelRun(taskId, userId);
+    return { ok: true };
+  }
   async regenerateShot(
     userId: string,
     taskId: string,
     dto: RegenerateShotDto
   ): Promise<{ ok: true }> {
     const task = await this.findOne(userId, taskId);
-    const shots: ShotState[] = ((task.storyboard as any) ?? []).slice();
-    const idx = shots.findIndex((s) => s.id === dto.shotId);
-    if (idx === -1) throw new Error(`Shot ${dto.shotId} not found`);
-
-    if (dto.description) shots[idx].description = dto.description;
-    shots[idx].status = 'generating';
-    shots[idx].errorMessage = undefined;
-    shots[idx].videoUrl = undefined;
-    await this.persistShots(taskId, shots);
-
-    this.creationGateway.emitShotProgress(taskId, {
-      shotId: shots[idx].id,
-      progress: 0,
-      status: 'generating',
-      message: `分镜 ${shots[idx].index} 重新生成中...`,
-    });
-
-    void this.regenerateOne(taskId, idx).catch((err) => {
-      this.logger.error(`[${taskId}] regenerateOne 异常: ${err?.message ?? err}`);
-    });
-
+    await this.consent.assert({ userId, productSpaceId: task.productSpaceId });
+    await this.video.cancelRun(taskId, userId);
+    const shots: any[] = task.storyboard || [];
+    const shot = shots.find((s) => s.id === dto.shotId);
+    if (!shot) throw new NotFoundException('Shot unavailable');
+    shot.revision = (shot.revision || 0) + 1;
+    shot.status = 'pending';
+    delete shot.videoUrl;
+    delete shot.taskId;
+    if (dto.description) shot.description = dto.description;
+    await this.tasks.update(taskId, { status: 'pending', storyboard: shots });
+    const options = (task.result as any)?.generationOptions || {
+      title: task.title,
+      productSpaceId: task.productSpaceId,
+    };
+    await this.enqueue(taskId, options);
     return { ok: true };
-  }
-
-  private async regenerateOne(taskId: string, idx: number): Promise<void> {
-    const task = await this.taskRepository.findOneOrFail({ where: { id: taskId } });
-    const shots: ShotState[] = ((task.storyboard as any) ?? []).slice();
-    const shot = shots[idx];
-
-    if (!this.arkConfigService.getActiveApiKey('video')) {
-      // 模拟成功
-      await this.delay(3000);
-      shot.status = 'completed';
-      shot.videoUrl = '';
-      await this.persistShots(taskId, shots);
-      this.creationGateway.emitShotProgress(taskId, {
-        shotId: shot.id,
-        progress: 100,
-        status: 'completed',
-        message: `分镜 ${shot.index} 已生成（模拟）`,
-      });
-      return;
-    }
-
-    try {
-      const created = await this.arkVideoService.createTask({
-        prompt: this.buildShotPrompt(shot, task.title, '9:16', '720p'),
-        ratio: '9:16',
-        resolution: '720p',
-        duration: shot.duration,
-      });
-      shot.taskId = created.id;
-      await this.persistShots(taskId, shots);
-
-      const result = await this.pollUntilDone(taskId, shot, 0, 1, 0);
-      shot.videoUrl = result.videoUrl;
-      shot.thumbnailUrl = result.thumbnailUrl;
-      shot.status = 'completed';
-      await this.persistShots(taskId, shots);
-      this.creationGateway.emitShotProgress(taskId, {
-        shotId: shot.id,
-        progress: 100,
-        status: 'completed',
-        message: `分镜 ${shot.index} 重新生成完成`,
-      });
-    } catch (err: any) {
-      shot.status = 'failed';
-      shot.errorMessage = err?.message ?? String(err);
-      await this.persistShots(taskId, shots);
-      this.creationGateway.emitShotProgress(taskId, {
-        shotId: shot.id,
-        progress: 0,
-        status: 'failed',
-        message: shot.errorMessage,
-      });
-    }
-  }
-
-  private delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
