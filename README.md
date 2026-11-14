@@ -1,5 +1,14 @@
 > **Gateway fork:** This maintained fork uses local llm-gateway/media-gateway services, private local assets and project cloud consent. ARK credentials are not used. Follow [local setup](plans/gateway-provider-integration/operations.md) and [security notes](plans/gateway-provider-integration/security-review.md). Historical upstream documentation below may describe the retired ARK/OSS deployment.
 
+Use the maintained `veglez/main` branch. With Node 24, pnpm 8.15.4, Docker, FFmpeg and `just` installed:
+
+```sh
+just setup
+just run
+```
+
+Open http://localhost:3000. Run `just` to list commands. Setup creates local secrets, starts PostgreSQL/Redis, builds the app and applies migrations. Configure scoped gateway keys and a supported voice in `apps/backend/.env` before opting a project into cloud processing.
+
 <p align="center">
   <img src="./.github/assets/social-preview.jpg" alt="VidForge — Multi-Agent video generation workspace" width="920" />
 </p>

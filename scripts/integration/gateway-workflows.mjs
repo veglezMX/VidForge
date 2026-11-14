@@ -98,7 +98,7 @@ const gateway = createServer(async (req, res) => {
         kind = jobs.get(id);
       return json({
         job_id: id,
-        status: mode === 'waiting' ? 'running' : 'succeeded',
+        status: mode === 'waiting' ? 'running' : mode === 'failed' ? 'failed' : 'succeeded',
         assets: [
           {
             asset_id: randomUUID(),
@@ -477,6 +477,21 @@ try {
   const migrated = await api('/material/' + material.id, undefined, token);
   assert.match(migrated.url, /^\/api\/assets\//);
   assert.equal((await fs.stat(legacyPath)).size, png.length);
+  mode = 'failed';
+  const rejectedTask = await api('/creation/task', dto, token);
+  let rejectedResult;
+  for (let i = 0; i < 80; i++) {
+    rejectedResult = await api('/creation/task/' + rejectedTask.id, undefined, token);
+    if (rejectedResult.status === 'failed') break;
+    await sleep(100);
+  }
+  assert.equal(
+    rejectedResult.status,
+    'failed',
+    'definitive gateway failure must not stay processing'
+  );
+  assert.equal(rejectedResult.storyboard[0].status, 'failed');
+  mode = 'normal';
   await api('/spaces/' + space.id, { cloudProcessingEnabled: false }, token, 'PATCH');
   const count = calls.length;
   await api('/creation/task', dto, token, 'POST', 403);

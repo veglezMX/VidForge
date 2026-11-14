@@ -1,3 +1,7 @@
+import {
+  GatewayRequestRejectedError,
+  SubmissionUncertainError,
+} from '../ai/services/gateway-transport.service';
 import { Injectable, NotFoundException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -6,7 +10,10 @@ import { CreationTask } from './entities/creation-task.entity';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { RegenerateShotDto } from './dto/regenerate-shot.dto';
 import { CreationGateway } from './gateway/creation.gateway';
-import { GatewayVideoService } from '../ai/services/gateway-video.service';
+import {
+  GatewayStageStoppedError,
+  GatewayVideoService,
+} from '../ai/services/gateway-video.service';
 import { CloudPolicyService } from '../ai/services/cloud-policy.service';
 import { ComposerService } from '../media/services/composer.service';
 import { QueueRunnerService } from '../queue/queue-runner.service';
@@ -126,7 +133,16 @@ export class CreationService implements OnModuleInit {
         shot.status = 'completed';
       } catch (error: any) {
         shot.errorMessage = error.message;
-        await this.tasks.update(taskId, { storyboard: shots, errorMessage: error.message });
+        const stopped =
+          error instanceof GatewayStageStoppedError ||
+          error instanceof SubmissionUncertainError ||
+          error instanceof GatewayRequestRejectedError;
+        if (stopped) shot.status = 'failed';
+        await this.tasks.update(taskId, {
+          storyboard: shots,
+          errorMessage: error.message,
+          ...(stopped ? { status: 'failed' as const } : {}),
+        });
         throw error;
       }
       await this.consent.assert(context);

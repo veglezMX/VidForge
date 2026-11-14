@@ -12,6 +12,8 @@ import { GatewayTransportService } from './gateway-transport.service';
 import { StorageService } from '../../media/services/storage.service';
 import { FfmpegService } from '../../media/services/ffmpeg.service';
 import { Material } from '../../material/entities/material.entity';
+export class GatewayStageStoppedError extends Error {}
+
 export type VideoGenerationOptions = {
   ratio?: '16:9' | '9:16' | '4:3' | '3:4' | '1:1' | '21:9';
   resolution?: '480p' | '720p' | '1080p';
@@ -127,7 +129,9 @@ export class GatewayVideoService implements VideoGenerationProvider {
     // Input IDs may expire and be re-uploaded; an already accepted video always resumes its original ID.
     if (operation.status === 'succeeded' && operation.localUrl) return operation;
     if (['cancelled', 'failed', 'reconciliation'].includes(operation.status))
-      throw new Error(`Generation ${operation.status}; start an explicit new run after review`);
+      throw new GatewayStageStoppedError(
+        `Generation ${operation.status}; start an explicit new run after review`
+      );
     if (!operation.remoteJobId) {
       const claim = await repo.update(
         { id: operation.id, status: 'pending' },
@@ -181,7 +185,7 @@ export class GatewayVideoService implements VideoGenerationProvider {
       const result = await this.transport.request('media', `/v1/jobs/${operation.remoteJobId}`);
       if (['failed', 'cancelled', 'reconciliation'].includes(result?.status)) {
         await repo.update(operation.id, { status: result.status });
-        throw new Error(`Gateway job ${result.status}`);
+        throw new GatewayStageStoppedError(`Gateway job ${result.status}`);
       }
       if (result?.status === 'succeeded') {
         const asset = result.assets?.[0];

@@ -3,6 +3,8 @@ import axios from 'axios';
 import { GatewayConfigService } from './gateway-config.service';
 import { CloudContext, CloudPolicyService } from './cloud-policy.service';
 
+export class GatewayRequestRejectedError extends Error {}
+
 export class SubmissionUncertainError extends Error {
   constructor() {
     super('Submission outcome is unknown. Reconciliation is required before a new billable run.');
@@ -45,9 +47,10 @@ export class GatewayTransportService {
       // Never return/log axios config, request headers, URLs or provider response bodies.
       if (body !== undefined && (!error.response || error.response.status >= 500))
         throw new SubmissionUncertainError();
-      throw new Error(
-        `Gateway request failed (${error.response?.status ?? 'unavailable'}). Check configuration, budget and supported options.`
-      );
+      const message = `Gateway request failed (${error.response?.status ?? 'unavailable'}). Check configuration, budget and supported options.`;
+      if (error.response?.status >= 400 && error.response.status < 500)
+        throw new GatewayRequestRejectedError(message);
+      throw new Error(message);
     }
   }
 }

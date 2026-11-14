@@ -4,13 +4,13 @@ Fork: `veglezMX/VidForge`. Maintained branch: `veglez/main`. The upstream main b
 
 ## Setup
 
-1. Install Node 24, pnpm 8.15.4, Docker and FFmpeg/ffprobe.
-2. Run `pnpm install --frozen-lockfile` and `node scripts/setup-local-secrets.mjs` from the repository root. The helper refuses existing environment files and writes generated JWT/database/Redis secrets with mode 0600.
-3. Start local PostgreSQL/Redis with `docker compose up -d`. Use existing gateway services only after their integration changes/migrations are reviewed; never reset their volumes.
-4. Build with `pnpm build`. From `apps/backend`, load its environment (for Node-based commands, `node --env-file=.env ...`) and run TypeORM migrations. The CLI migration command requires environment variables exported; `set -a; source .env; set +a` in a local Bash shell is one option. Run `pnpm migration:run` and `pnpm checkpointer:setup` there.
-5. Configure only scoped gateway virtual keys in `apps/backend/.env`. Text/vision use llm-gateway `openai-main`; image/video/voice use media-gateway `image-main`, `video-main`, `voice-main`. Set a supported `SPEECH_VOICE`, such as `Rachel`, before narration. Each dedicated key must have a finite budget and an exact model allowlist. Never copy provider or master credentials into VidForge.
-6. Run the backend API, a `PROCESS_ROLE=media-worker` backend worker, and (for agent workflows) a `PROCESS_ROLE=agent-worker` worker with the same local database, Redis and private storage. Example from `apps/backend`: `node --env-file=.env dist/main.js` and `PROCESS_ROLE=media-worker node --env-file=.env dist/worker-main.js`. Start the frontend with `pnpm --filter @vidforge/frontend dev`.
-7. Create a project. Uploads remain local. Enable its cloud-processing switch explicitly before scripts, analysis, generation or narration.
+1. Install Node 24, pnpm 8.15.4, Docker Compose, FFmpeg/ffprobe and `just`. Use branch `veglez/main` from `veglezMX/VidForge`.
+2. Run `just setup`. This checks tools, installs the frozen workspace lockfile, generates local secrets once, starts healthy PostgreSQL/Redis services, builds both applications, applies migrations and initializes checkpoint tables. Existing environments and data are preserved. A partially configured environment requires completing the missing file manually.
+3. Configure scoped gateway virtual keys in `apps/backend/.env`. Text/vision use llm-gateway `openai-main`; image/video/voice use media-gateway `image-main`, `video-main`, `voice-main`. Set a supported `SPEECH_VOICE`, such as `Rachel`, before narration. Use finite budgets and exact model allowlists. Never copy provider or master credentials into VidForge. Gateway services must already be running with the integration migrations applied.
+4. Run `just run` and open http://localhost:3000. It starts the frontend, API, media worker and agent worker together; Ctrl-C stops all four. The backend environment is parsed as data before modules load. Run `just build` after source changes; individual processes are also available as `just frontend`, `just api`, `just media-worker` and `just agent-worker`.
+5. Create a project. Uploads remain local. Enable its cloud-processing switch explicitly before scripts, analysis, generation or narration.
+
+Run `just` for commands, `just verify` for checks, `just integration` for isolated workflows, and `just stop` to stop PostgreSQL/Redis while retaining data. `just setup` does not provision keys or submit provider requests.
 
 ## Gateway storage
 
@@ -46,3 +46,7 @@ node scripts/provision-gateway-keys.mjs \
 ```
 
 Budget values are policy choices, not provider price quotes. Do not run the paid smoke until its total cap is explicitly approved.
+
+## Provider availability checked during implementation
+
+Media-gateway `video-main` now uses the approved H3 Max Turbo mapping after the previous Wan endpoint returned 404. Deploy the merged media-gateway version with its schema migrations before configuring VidForge against it; merging code does not upgrade an already-running gateway. Preserve any unrelated gateway feature deployments and routes. The text/vision alias `openai-main` requires funding its existing OpenAI account: the implementation smoke received an out-of-credits response. No fallback is configured.
