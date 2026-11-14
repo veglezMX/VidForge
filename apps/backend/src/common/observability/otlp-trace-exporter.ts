@@ -77,6 +77,8 @@ export class OtlpTraceExporter {
   }
 
   private resolveEndpoint(): string | undefined {
+    if (process.env.VIDFORGE_PROFILE !== 'hosted' || process.env.TELEMETRY_ENABLED !== 'true')
+      return undefined;
     const endpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?.trim();
     if (endpoint) return endpoint;
     const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();

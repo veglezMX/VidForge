@@ -1,5 +1,6 @@
 /** JWT 解码后的负载结构 */
 export interface JwtPayload {
+  sessionVersion?: number;
   sub: string; // userId
   email: string;
   role: string;

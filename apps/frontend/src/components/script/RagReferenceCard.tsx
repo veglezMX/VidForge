@@ -8,7 +8,7 @@ const { Text, Paragraph } = Typography;
 interface Props {
   references?: RagReference[];
   /** 模型来源,fallback 时不展示 */
-  source?: 'ark' | 'fallback';
+  source?: 'gateway' | 'fallback';
 }
 
 const HOOK_COLOR: Record<string, string> = {

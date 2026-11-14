@@ -6,6 +6,7 @@ import { ExportService } from '../export/export.service';
 test('creation API enqueues a serializable shot job with a stable id', async () => {
   const jobs: Array<Record<string, unknown>> = [];
   const repo = {
+    findOneByOrFail: async () => ({ id: 'creation-1', userId: 'user-1', storyboard: [] }),
     create: (value: Record<string, unknown>) => ({ ...value, id: 'creation-1' }),
     save: async (value: Record<string, unknown>) => value,
     update: async () => undefined,
@@ -26,8 +27,7 @@ test('creation API enqueues a serializable shot job with a stable id', async () 
     repo as never,
     {} as never,
     {} as never,
-    {} as never,
-    {} as never,
+    { assert: async () => {} } as never,
     {} as never,
     queueRunner as never
   );
@@ -40,7 +40,7 @@ test('creation API enqueues a serializable shot job with a stable id', async () 
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0]?.queueName, 'creation-shot');
   assert.equal(jobs[0]?.jobName, 'generate-shot');
-  assert.equal(jobs[0]?.jobId, 'creation-shot:creation-1');
+  assert.equal(jobs[0]?.jobId, 'creation-shot:creation-1:0');
   assert.deepEqual(jobs[0]?.data, {
     taskId: 'creation-1',
     dto: { title: 'demo', storyboard: [{ description: 'shot 1' }] },

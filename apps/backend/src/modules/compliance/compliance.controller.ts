@@ -14,7 +14,7 @@ export class ComplianceController {
   @ApiOperation({ summary: '对一段文本做合规扫描' })
   async scan(@Body() body: { text: string; forbidden?: string[]; useLlm?: boolean }) {
     if (body.useLlm) {
-      return this.compliance.scanTextWithLlm(body.text, body.forbidden ?? []);
+      throw new Error('Use project-scoped script generation for cloud review');
     }
     return this.compliance.scanText(body.text, body.forbidden ?? []);
   }

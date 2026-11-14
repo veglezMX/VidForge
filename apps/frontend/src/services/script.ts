@@ -64,7 +64,7 @@ export interface ScriptResult {
   voiceover: string;
   bgmSuggestion: string;
   tags: string[];
-  source: 'ark' | 'fallback';
+  source: 'gateway' | 'fallback';
   fallbackReason?: string;
   ragReferences?: RagReference[];
   compliance?: ComplianceReport;

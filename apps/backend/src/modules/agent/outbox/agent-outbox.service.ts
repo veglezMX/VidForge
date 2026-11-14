@@ -33,6 +33,7 @@ export class AgentOutboxService implements OnModuleInit, OnModuleDestroy {
     private readonly queueRunner: QueueRunnerService
   ) {}
 
+  private agentAuthorize: ((payload: AgentDispatchPayload) => Promise<void>) | undefined;
   private agentFallback: ((payload: AgentDispatchPayload) => Promise<void>) | undefined;
 
   async onModuleInit(): Promise<void> {
@@ -45,7 +46,11 @@ export class AgentOutboxService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer);
   }
 
-  registerAgentFallback(handler: (payload: AgentDispatchPayload) => Promise<void>): void {
+  registerAgentFallback(
+    handler: (payload: AgentDispatchPayload) => Promise<void>,
+    authorize?: (payload: AgentDispatchPayload) => Promise<void>
+  ): void {
+    this.agentAuthorize = authorize;
     this.agentFallback = handler;
   }
 
@@ -111,6 +116,8 @@ export class AgentOutboxService implements OnModuleInit, OnModuleDestroy {
   private async dispatch(event: AgentOutboxEvent): Promise<void> {
     try {
       const payload = event.payload as unknown as AgentDispatchPayload;
+      if (!this.agentAuthorize) throw new Error('Agent dispatch authorization is not registered');
+      await this.agentAuthorize(payload);
       await this.queueRunner.enqueue(
         QUEUE_NAMES.AGENT_RUN,
         event.eventType,

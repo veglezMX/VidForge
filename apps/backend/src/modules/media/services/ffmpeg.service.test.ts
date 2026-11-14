@@ -20,6 +20,6 @@ test('local media inputs cannot escape the backend storage root', async () => {
 
   await assert.rejects(
     () => service.downloadTo(pathToFileURL(outsideStorage).href, path.join('/tmp', 'copy.mp4')),
-    /必须位于 storage 目录内/
+    /Use owned local assets/
   );
 });

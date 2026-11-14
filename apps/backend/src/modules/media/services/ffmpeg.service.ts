@@ -2,9 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { createWriteStream } from 'fs';
-import { fileURLToPath } from 'url';
-import axios from 'axios';
 import { MediaProcessingProvider } from '../../../providers/provider.contracts';
 
 export function assertDownloadSize(bytes: number, maxBytes: number): void {
@@ -44,65 +41,60 @@ export class FfmpegService implements MediaProcessingProvider {
    * 大于 100MB 的文件会被拒绝(防止恶意 URL)
    */
   async downloadTo(url: string, destPath: string, maxBytes = 100 * 1024 * 1024): Promise<string> {
-    if (!url) throw new Error('downloadTo: url 为空');
-    assertDownloadSize(0, maxBytes);
-    this.logger.debug(`下载 ${url} -> ${destPath}`);
+    throw new Error('Use owned local assets or the configured gateway downloader');
+  }
 
-    // 本地开发/fixture 模式允许从 backend/storage 读取素材，生产环境仍只接受 HTTP(S)。
+  async validateUpload(
+    file: string
+  ): Promise<{ mime: string; ext: string; type: 'image' | 'video' | 'audio' }> {
+    const handle = await fs.open(file, 'r');
+    const head = Buffer.alloc(16);
+    await handle.read(head, 0, 16, 0);
+    await handle.close();
+    let kind: { mime: string; ext: string; type: 'image' | 'video' | 'audio' };
+    if (head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+      kind = { mime: 'image/png', ext: 'png', type: 'image' };
+    else if (head[0] === 255 && head[1] === 216 && head[2] === 255)
+      kind = { mime: 'image/jpeg', ext: 'jpg', type: 'image' };
+    else if (head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP')
+      kind = { mime: 'image/webp', ext: 'webp', type: 'image' };
+    else if (head.toString('ascii', 4, 8) === 'ftyp')
+      kind = { mime: 'video/mp4', ext: 'mp4', type: 'video' };
+    else if (head.toString('ascii', 0, 3) === 'ID3' || (head[0] === 255 && (head[1] & 224) === 224))
+      kind = { mime: 'audio/mpeg', ext: 'mp3', type: 'audio' };
+    else throw new Error('Unsupported media content');
+    const size = (await fs.stat(file)).size;
+    if (size <= 0 || size > (kind.type === 'image' ? 10 : 100) * 1024 * 1024)
+      throw new Error('Media exceeds size limit');
+    const metadata = await this.probe(file);
     if (
-      process.env.NODE_ENV !== 'production' &&
-      (url.startsWith('file://') || path.isAbsolute(url))
-    ) {
-      const sourcePath = path.resolve(url.startsWith('file://') ? fileURLToPath(url) : url);
-      const storageRoot = path.resolve(process.cwd(), 'storage');
-      if (sourcePath !== storageRoot && !sourcePath.startsWith(`${storageRoot}${path.sep}`)) {
-        throw new Error('downloadTo: 本地素材必须位于 storage 目录内');
-      }
-      const stat = await fs.stat(sourcePath);
-      assertDownloadSize(stat.size, maxBytes);
-      await fs.mkdir(path.dirname(destPath), { recursive: true });
-      await fs.copyFile(sourcePath, destPath);
-      return destPath;
-    }
-
-    const resp = await axios.get(url, {
-      responseType: 'stream',
-      timeout: 60000,
-      maxContentLength: maxBytes,
-      maxBodyLength: maxBytes,
-    });
-
-    await fs.mkdir(path.dirname(destPath), { recursive: true });
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const writer = createWriteStream(destPath);
-        let bytes = 0;
-        let settled = false;
-        const fail = (error: Error) => {
-          if (settled) return;
-          settled = true;
-          resp.data.destroy();
-          writer.destroy();
-          reject(error);
-        };
-        resp.data.on('data', (chunk: Buffer) => {
-          bytes += chunk.length;
-          if (bytes > maxBytes) fail(new Error(`下载内容超过大小限制 (${maxBytes} bytes)`));
-        });
-        resp.data.pipe(writer);
-        writer.on('finish', () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        });
-        writer.on('error', fail);
-        resp.data.on('error', fail);
-      });
-    } catch (error) {
-      await fs.unlink(destPath).catch(() => undefined);
-      throw error;
-    }
-    return destPath;
+      kind.type !== 'audio' &&
+      (!metadata.width || !metadata.height || metadata.width * metadata.height > 25_000_000)
+    )
+      throw new Error('Invalid media dimensions');
+    if (
+      kind.type !== 'image' &&
+      (!Number.isFinite(metadata.durationSec) ||
+        metadata.durationSec <= 0 ||
+        metadata.durationSec > 900)
+    )
+      throw new Error('Invalid media duration');
+    await this.run('ffmpeg', [
+      '-v',
+      'error',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      file,
+      '-frames:v',
+      '1',
+      '-t',
+      '1',
+      '-f',
+      'null',
+      '-',
+    ]);
+    return kind;
   }
 
   /**
@@ -425,18 +417,24 @@ export class FfmpegService implements MediaProcessingProvider {
     return new Promise((resolve, reject) => {
       this.logger.debug(`${cmd} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
       const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const deadline = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error('Media execution deadline exceeded'));
+      }, 120000);
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (d) => {
-        stdout += d.toString();
+        stdout = (stdout + d.toString()).slice(-1024 * 1024);
       });
       child.stderr?.on('data', (d) => {
-        stderr += d.toString();
+        stderr = (stderr + d.toString()).slice(-8192);
       });
       child.on('error', (err) => {
+        clearTimeout(deadline);
         reject(new Error(`${cmd} 启动失败: ${err.message}`));
       });
       child.on('close', (code) => {
+        clearTimeout(deadline);
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {

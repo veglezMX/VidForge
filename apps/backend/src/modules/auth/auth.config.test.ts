@@ -7,11 +7,8 @@ test('production requires a JWT secret of at least 32 characters', () => {
   assert.throws(() => resolveJwtSecret('production', 'too-short'), /at least 32 characters/);
 });
 
-test('development can use a local-only fallback secret', () => {
-  assert.equal(
-    resolveJwtSecret('development', undefined),
-    'vidforge-local-development-only-secret'
-  );
+test('development also requires an explicit secret', () => {
+  assert.throws(() => resolveJwtSecret('development', undefined), /at least 32 characters/);
 });
 
 test('configured JWT secrets are trimmed', () => {

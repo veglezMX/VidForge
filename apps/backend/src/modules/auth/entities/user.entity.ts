@@ -9,6 +9,9 @@ import {
 
 @Entity('users')
 export class User {
+  @Column({ default: 0 })
+  sessionVersion: number;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

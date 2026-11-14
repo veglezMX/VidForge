@@ -1,6 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { ArkTextService } from '../ai/services/ark-text.service';
-import { ArkConfigService } from '../ai/services/ark-config.service';
+import { GatewayTextService } from '../ai/services/gateway-text.service';
+import { GatewayConfigService } from '../ai/services/gateway-config.service';
 
 export interface ComplianceHit {
   word: string;
@@ -136,8 +136,8 @@ export class ComplianceService {
    * 商家在商品空间设置页更新后,下次脚本生成即生效,无需重启服务。
    */
   constructor(
-    @Optional() private readonly arkText?: ArkTextService,
-    @Optional() private readonly arkConfig?: ArkConfigService
+    @Optional() private readonly arkText?: GatewayTextService,
+    @Optional() private readonly arkConfig?: GatewayConfigService
   ) {}
 
   /**
@@ -164,7 +164,7 @@ export class ComplianceService {
       return base;
     }
     // 低分调 LLM 复核
-    if (!this.arkText || !this.arkConfig?.getActiveApiKey('text')) {
+    if (!this.arkText || !this.arkConfig?.available('text')) {
       return base;
     }
 
@@ -294,7 +294,7 @@ ${hitSummary}
       traceSpan: 'compliance.llm-review',
     });
 
-    const content: string = resp?.choices?.[0]?.message?.content ?? '';
+    const content: string = resp?.text ?? '';
     const m = content.match(/\{[\s\S]*\}/);
     if (!m) throw new Error('LLM 返回非 JSON');
     const json = JSON.parse(m[0]);

@@ -112,12 +112,14 @@ export class AuthService {
     const ok = await bcrypt.compare(dto.oldPassword, user.passwordHash);
     if (!ok) throw new BadRequestException('原密码不正确');
     user.passwordHash = await bcrypt.hash(dto.newPassword, SALT_ROUNDS);
+    user.sessionVersion = (user.sessionVersion || 0) + 1;
     await this.userRepo.save(user);
   }
 
   private signToken(user: User): string {
     const payload: JwtPayload = {
       sub: user.id,
+      sessionVersion: user.sessionVersion || 0,
       email: user.email,
       role: user.role,
     };

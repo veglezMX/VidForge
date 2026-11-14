@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -99,7 +100,7 @@ export class QueueRunnerService implements OnApplicationShutdown {
       priority: options?.priority,
       delay: options?.delay,
       attempts: options?.attempts ?? 3,
-      jobId: options?.jobId,
+      jobId: options?.jobId ? createHash('sha256').update(options.jobId).digest('hex') : undefined,
     });
     this.logger.log(`[queue:${queueName}] 入队 ${jobName} jobId=${job.id}`);
     return { jobId: String(job.id), mode: 'queue' };

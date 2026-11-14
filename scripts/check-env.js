@@ -90,12 +90,11 @@ if (fs.existsSync(envPath)) {
   const requiredEnvs = ['DATABASE_URL', 'JWT_SECRET'];
   const optionalEnvs = [
     'REDIS_URL',
-    'ARK_TEXT_PRIMARY_ENDPOINT_ID',
-    'ARK_TEXT_PRIMARY_API_KEY',
-    'ARK_VIDEO_PRIMARY_ENDPOINT_ID',
-    'ARK_VIDEO_PRIMARY_API_KEY',
-    'OSS_ACCESS_KEY_ID',
-    'OSS_ACCESS_KEY_SECRET',
+    'LLM_GATEWAY_URL',
+    'LLM_GATEWAY_KEY',
+    'MEDIA_GATEWAY_URL',
+    'MEDIA_GATEWAY_KEY',
+    'SPEECH_VOICE',
   ];
 
   requiredEnvs.forEach((envKey) => {

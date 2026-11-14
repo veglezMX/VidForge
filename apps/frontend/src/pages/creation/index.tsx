@@ -1,3 +1,5 @@
+import { Select } from 'antd';
+import { aiApi } from '../../services/ai';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import {
@@ -11,7 +13,6 @@ import {
   Tag,
   Row,
   Col,
-  Slider,
   message,
   Timeline,
   Segmented,
@@ -120,10 +121,21 @@ function CreationPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [selectedModel, setSelectedModel] = useState('seedance-1.5-pro');
+  const [selectedModel, setSelectedModel] = useState('video-main');
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9' | '1:1'>('9:16');
   const [quality, setQuality] = useState<'720p' | '1080p'>('720p');
-  const [duration, setDuration] = useState<number>(15);
+  const [duration, setDuration] = useState<number>(18);
+  const [supportedDurations, setSupportedDurations] = useState<number[]>([]);
+  useEffect(() => {
+    aiApi
+      .capabilities()
+      .then(({ shotDurations }) => {
+        const totals = shotDurations.map((seconds) => seconds * 3);
+        setSupportedDurations(totals);
+        if (totals.length) setDuration(totals[0]);
+      })
+      .catch(() => setSupportedDurations([]));
+  }, []);
   const [scriptLoading, setScriptLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
 
@@ -351,7 +363,7 @@ function CreationPage() {
       setStoryboard(shots);
       setCurrentStep('storyboard');
       message.success(
-        `已生成 ${shots.length} 个分镜（来源：${result?.source === 'ark' ? 'AI' : '兜底'}）`
+        `已生成 ${shots.length} 个分镜（来源：${result?.source === 'gateway' ? 'AI' : '兜底'}）`
       );
 
       // 自动保存剧本到后端，获得 scriptId 供后续单分镜重生成使用
@@ -699,10 +711,10 @@ function CreationPage() {
                       onChange={(e) => setSelectedModel(e.target.value)}
                     >
                       <Space direction="vertical">
-                        <Radio value="seedance-1.5-pro">
+                        <Radio value="video-main">
                           <Space>
                             <Text style={{ color: 'var(--text-primary)' }}>
-                              Doubao-Seedance-1.5-pro
+                              Configured video gateway
                             </Text>
                             <Tag color="green" style={{ borderRadius: 20 }}>
                               主力
@@ -748,14 +760,11 @@ function CreationPage() {
                       </Text>
                     }
                   >
-                    <Slider
-                      min={10}
-                      max={30}
-                      step={5}
-                      marks={{ 10: '10s', 15: '15s', 20: '20s', 25: '25s', 30: '30s' }}
+                    <Select
                       value={duration}
-                      onChange={(v) => setDuration(v as number)}
-                      tooltip={{ formatter: (v) => `${v}秒` }}
+                      onChange={setDuration}
+                      disabled={!supportedDurations.length}
+                      options={supportedDurations.map((value) => ({ value, label: `${value}秒` }))}
                     />
                     <Text style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                       系统将生成 3 个分镜

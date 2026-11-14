@@ -7,7 +7,8 @@ import { BgmService } from './services/bgm.service';
 import { StorageService } from './services/storage.service';
 import { ComposerService } from './services/composer.service';
 import { OssService } from './services/oss.service';
-import { AiModule } from '../ai/ai.module';
+import { AssetsController } from './assets.controller';
+import { AuthModule } from '../auth/auth.module';
 
 /**
  * 媒体处理统一模块
@@ -24,7 +25,8 @@ import { AiModule } from '../ai/ai.module';
  */
 @Global()
 @Module({
-  imports: [AiModule],
+  imports: [AuthModule],
+  controllers: [AssetsController],
   providers: [
     FfmpegService,
     SubtitleService,

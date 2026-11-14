@@ -1,30 +1,31 @@
-import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { Global, Module } from '@nestjs/common';
+import { GatewayConfigService } from './services/gateway-config.service';
+import { GatewayTextService } from './services/gateway-text.service';
+import { GatewayVisionService } from './services/gateway-vision.service';
+import { GatewayVideoService } from './services/gateway-video.service';
+import { GatewayTransportService } from './services/gateway-transport.service';
+import { CloudPolicyService } from './services/cloud-policy.service';
 import { AiController } from './ai.controller';
-import { ArkConfigService } from './services/ark-config.service';
-import { ArkTextService } from './services/ark-text.service';
-import { ArkVideoService } from './services/ark-video.service';
-import { ArkVisionService } from './services/ark-vision.service';
-import { ArkResponseCacheService } from './services/ark-response-cache.service';
-import { ArkModelOverride } from './entities/ark-model-override.entity';
 import { AuthModule } from '../auth/auth.module';
-
+@Global()
 @Module({
-  imports: [AuthModule, TypeOrmModule.forFeature([ArkModelOverride])],
+  imports: [AuthModule],
   controllers: [AiController],
   providers: [
-    ArkConfigService,
-    ArkTextService,
-    ArkVideoService,
-    ArkVisionService,
-    ArkResponseCacheService,
+    GatewayConfigService,
+    GatewayTextService,
+    GatewayVisionService,
+    GatewayVideoService,
+    GatewayTransportService,
+    CloudPolicyService,
   ],
   exports: [
-    ArkConfigService,
-    ArkTextService,
-    ArkVideoService,
-    ArkVisionService,
-    ArkResponseCacheService,
+    GatewayConfigService,
+    GatewayTextService,
+    GatewayVisionService,
+    GatewayVideoService,
+    GatewayTransportService,
+    CloudPolicyService,
   ],
 })
 export class AiModule {}

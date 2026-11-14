@@ -40,7 +40,16 @@ test('queue runner preserves idempotency job IDs when Redis is available', async
     { jobId: 'material-analyze:material-1', attempts: 4 }
   );
 
-  assert.deepEqual(result, { jobId: 'material-analyze:material-1', mode: 'queue' });
+  assert.equal(result.mode, 'queue');
+  assert.match(result.jobId!, /^[a-f0-9]{64}$/);
+  const repeated = await runner.enqueue(
+    QUEUE_NAMES.MATERIAL_ANALYZE,
+    'analyze-material',
+    { materialId: 'material-1' },
+    async () => {},
+    { jobId: 'material-analyze:material-1' }
+  );
+  assert.equal(repeated.jobId, result.jobId);
   assert.equal(fallbackCalled, false);
 });
 

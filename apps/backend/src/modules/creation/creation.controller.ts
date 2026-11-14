@@ -26,6 +26,11 @@ export class CreationController {
     return this.creationService.findAll(user.sub, spaceId);
   }
 
+  @Post('task/:id/cancel')
+  cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.creationService.cancel(user.sub, id);
+  }
+
   @Get('task/:id')
   @ApiOperation({ summary: '获取任务详情' })
   findOne(@CurrentUser() user: JwtPayload, @Param('id') id: string) {

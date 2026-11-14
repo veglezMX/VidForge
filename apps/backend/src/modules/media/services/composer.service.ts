@@ -1,3 +1,4 @@
+import { CloudPolicyService } from '../../ai/services/cloud-policy.service';
 import { Injectable, Logger } from '@nestjs/common';
 import * as path from 'path';
 import { FfmpegService } from './ffmpeg.service';
@@ -16,6 +17,8 @@ export interface ComposeShotInput {
 }
 
 export interface ComposeOptions {
+  userId?: string;
+  productSpaceId?: string;
   taskId: string;
   title: string;
   ratio: '9:16' | '16:9' | '1:1';
@@ -106,7 +109,8 @@ export class ComposerService {
     private readonly subtitle: SubtitleService,
     private readonly tts: TtsService,
     private readonly bgm: BgmService,
-    private readonly storage: StorageService
+    private readonly storage: StorageService,
+    private readonly consent: CloudPolicyService
   ) {}
 
   async compose(shots: ComposeShotInput[], opts: ComposeOptions): Promise<ComposeResult> {
@@ -125,7 +129,7 @@ export class ComposerService {
       for (let i = 0; i < shots.length; i++) {
         const shot = shots[i];
         const local = path.join(segmentsDir, `seg_${String(i).padStart(2, '0')}.mp4`);
-        await this.ffmpeg.downloadTo(shot.videoUrl, local);
+        await this.storage.copyOwned(shot.videoUrl, opts.userId!, local);
         const metadata = await this.ffmpeg.probe(local);
         validateMediaMetadata(metadata, `分镜 ${shot.index}`);
         localSegments.push(local);
@@ -149,7 +153,13 @@ export class ComposerService {
         .join(' ');
       if (fullVoiceover) {
         const tmpVoice = path.join(workdir, 'voice.mp3');
-        const voiceResult = await this.tts.synthesize(fullVoiceover, tmpVoice);
+        const voiceResult = await this.tts.synthesize(
+          fullVoiceover,
+          tmpVoice,
+          undefined,
+          undefined,
+          { userId: opts.userId!, productSpaceId: opts.productSpaceId!, runId: taskId }
+        );
         voicePath = voiceResult.outPath;
         voiceoverDuration = voiceResult.durationSec;
         onProgress(58, `TTS 配音完成 (${voiceResult.mode})`);
@@ -196,7 +206,18 @@ export class ComposerService {
 
       // ── Step 7: 发布到 outputs ──────────────────────────────
       const outputName = `${taskId}.mp4`;
-      const published = await this.storage.publish(finalLocalPath, 'creation', outputName);
+      if (opts.productSpaceId)
+        await this.consent.assert({
+          userId: opts.userId,
+          productSpaceId: opts.productSpaceId,
+          runId: taskId,
+        });
+      const published = await this.storage.publish(
+        finalLocalPath,
+        'creation',
+        outputName,
+        opts.userId
+      );
       onProgress(98, '产物已发布');
 
       // ── Step 8: 探测时长 ────────────────────────────────
